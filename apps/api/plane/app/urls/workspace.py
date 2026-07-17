@@ -36,6 +36,7 @@ from plane.app.views import (
     WorkspaceHomePreferenceViewSet,
     WorkspaceStickyViewSet,
     WorkspaceUserPreferenceViewSet,
+    TeamCalendarEndpoint,
 )
 
 
@@ -93,6 +94,11 @@ urlpatterns = [
         "workspaces/<str:slug>/project-members/",
         WorkspaceProjectMemberEndpoint.as_view(),
         name="workspace-member-roles",
+    ),
+    path(
+        "workspaces/<str:slug>/team-calendar/",
+        TeamCalendarEndpoint.as_view(),
+        name="workspace-team-calendar",
     ),
     path(
         "workspaces/<str:slug>/members/<uuid:pk>/",
