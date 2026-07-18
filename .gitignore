@@ -117,3 +117,13 @@ packages/i18n/src/types/keys.generated.ts
 
 # Local security notes (not for version control)
 /security/
+
+# Plane deploy.sh generated files
+.deploy.conf
+docker-compose.override.yml
+backup-plane-db-*.sql
+
+# Staging deploy (contains secrets - do NOT commit)
+staging-deploy.sh
+docker-compose.staging.yml
+backup-plane-staging-*.sql
