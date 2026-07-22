@@ -10,6 +10,7 @@ from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.utils import timezone
 from django.db import IntegrityError
+from django.db.models import Q
 
 # Third party imports
 from rest_framework import status
@@ -708,8 +709,14 @@ class ProjectBulkAssetEndpoint(BaseAPIView):
         if not asset_ids:
             return Response({"error": "No asset ids provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # get the asset id — scope to the project to prevent cross-project IDOR
-        assets = FileAsset.objects.filter(id__in=asset_ids, workspace__slug=slug, project_id=project_id)
+        # get the asset id — scope to the project to prevent cross-project IDOR.
+        # Allow still-unassigned assets (project_id is null) to be claimed, but only
+        # by their uploader: cover images are uploaded before the project exists, so
+        # the association happens here. Assets already bound to another project stay
+        # out of reach.
+        assets = FileAsset.objects.filter(id__in=asset_ids, workspace__slug=slug).filter(
+            Q(project_id=project_id) | Q(project_id__isnull=True, created_by=request.user)
+        )
 
         # Get the first asset
         asset = assets.first()
