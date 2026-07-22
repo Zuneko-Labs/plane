@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ---- Static config ----------------------------------------------------------
 REPO_URL="git@github.com:Zuneko-Labs/plane.git"
-BRANCH="preview"
+BRANCH="staging"
 COMPOSE_FILE="docker-compose.yml"       # root file = build from source (your code)
 PROJECT_NAME="plane"                    # docker compose project (volume prefix) - DO NOT change
 CONF_FILE=".deploy.conf"                # stores non-secret answers
@@ -165,6 +165,14 @@ apply_config() {
     set_env "VITE_ADMIN_BASE_URL" "${APP_URL}" "$WEB_ENV"
     set_env "VITE_SPACE_BASE_URL" "${APP_URL}" "$WEB_ENV"
     set_env "VITE_LIVE_BASE_URL"  "${APP_URL}" "$WEB_ENV"
+
+    # MinIO endpoint (dockerized) + enable, so uploads work inside compose network
+    set_env "AWS_S3_ENDPOINT_URL" "http://plane-minio:9000" "$API_ENV"
+    set_env "USE_MINIO"           "1"                        "$API_ENV"
+    # Live server secret must match between api and the live service
+    set_env "LIVE_SERVER_SECRET_KEY" "secret-key" "$API_ENV"
+    set_env "LIVE_SERVER_SECRET_KEY" "secret-key" "$ROOT_ENV"
+    set_env "API_BASE_URL"           "http://api:8000" "$ROOT_ENV"
 
     # SMTP -> API env (seeded into DB on first boot; smtp-sync to change later)
     if [ "${SMTP_ENABLE:-N}" = "Y" ] && [ -n "${SMTP_HOST:-}" ]; then
