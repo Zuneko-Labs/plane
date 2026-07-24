@@ -39,6 +39,7 @@ from plane.app.serializers import (
     IssueListDetailSerializer,
     IssueSerializer,
     ProjectUserPropertySerializer,
+    RecurrenceSerializer,
 )
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
@@ -53,6 +54,7 @@ from plane.db.models import (
     IssueLabel,
     IssueLink,
     IssueReaction,
+    IssueRecurrence,
     IssueRelation,
     IssueSubscriber,
     ProjectUserProperty,
@@ -72,6 +74,7 @@ from plane.utils.host import base_host
 from plane.utils.issue_filters import issue_filters
 from plane.utils.order_queryset import order_issue_queryset
 from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
+from plane.utils.recurrence import add_interval, derive_days_of_month, next_month_day
 from plane.utils.timezone_converter import user_timezone_converter
 
 from .. import BaseAPIView, BaseViewSet
@@ -389,6 +392,47 @@ class IssueViewSet(BaseViewSet):
                 on_results=lambda issues: issue_on_results(group_by=group_by, issues=issues, sub_group_by=sub_group_by),
             )
 
+    def _create_recurrence(self, request, issue, project):
+        """Create an IssueRecurrence row from the request's recurrence rule.
+
+        No-op when the request carries no ``recurrence`` object. Each occurrence
+        is cloned from the live source issue at generation time, so no field
+        snapshot is stored here — only the schedule.
+        """
+        recurrence_data = request.data.get("recurrence")
+        if not recurrence_data:
+            return
+
+        recurrence_serializer = RecurrenceSerializer(data=recurrence_data)
+        recurrence_serializer.is_valid(raise_exception=True)
+        rule = recurrence_serializer.validated_data
+
+        # Series start defaults to the issue's start date, else today.
+        start_date = rule.get("start_date") or issue.start_date or timezone.now().date()
+
+        # For "N times per month" (monthly only), spread the occurrences across
+        # target days derived from the start day, e.g. start day 23 -> [8, 23].
+        times = rule.get("times_per_month", 1)
+        days_of_month = []
+        if rule["frequency"] == "monthly" and times > 1:
+            days_of_month = derive_days_of_month(start_date.day, times)
+            next_run_at = next_month_day(start_date, days_of_month)
+        else:
+            next_run_at = add_interval(start_date, rule["frequency"])
+
+        # The first occurrence is the issue we just created. The series runs
+        # indefinitely until the toggle is turned off on the source work item.
+        IssueRecurrence.objects.create(
+            source_issue=issue,
+            project=project,
+            workspace_id=project.workspace_id,
+            frequency=rule["frequency"],
+            start_date=start_date,
+            days_of_month=days_of_month,
+            next_run_at=next_run_at,
+            is_active=True,
+        )
+
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def create(self, request, slug, project_id):
         project = Project.objects.get(pk=project_id)
@@ -404,6 +448,10 @@ class IssueViewSet(BaseViewSet):
 
         if serializer.is_valid():
             serializer.save()
+
+            # If a recurrence rule was supplied, persist it against this first
+            # occurrence. A daily Celery Beat task creates the rest.
+            self._create_recurrence(request, serializer.instance, project)
 
             # Track the issue
             issue_activity.delay(
@@ -1353,3 +1401,61 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
         # Serialize the issue
         serializer = IssueDetailSerializer(issue, expand=self.expand)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class IssueRecurrenceEndpoint(BaseAPIView):
+    """Read and toggle the recurrence rule attached to a work item."""
+
+    def _serialize(self, recurrence):
+        if recurrence is None:
+            return None
+        return {
+            "id": str(recurrence.id),
+            "frequency": recurrence.frequency,
+            "start_date": recurrence.start_date,
+            "next_run_at": recurrence.next_run_at,
+            "is_active": recurrence.is_active,
+        }
+
+    def _find_recurrence(self, slug, project_id, issue_id):
+        """Match a recurrence whose source OR a generated occurrence is this
+        work item, so the toggle works from the source and every occurrence."""
+        return (
+            IssueRecurrence.objects.filter(
+                Q(source_issue_id=issue_id) | Q(occurrences__id=issue_id),
+                workspace__slug=slug,
+                project_id=project_id,
+            )
+            .order_by("-created_at")
+            .distinct()
+            .first()
+        )
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST], level="PROJECT")
+    def get(self, request, slug, project_id, issue_id):
+        recurrence = self._find_recurrence(slug, project_id, issue_id)
+        return Response({"recurrence": self._serialize(recurrence)}, status=status.HTTP_200_OK)
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    def patch(self, request, slug, project_id, issue_id):
+        recurrence = self._find_recurrence(slug, project_id, issue_id)
+        if recurrence is None:
+            return Response({"error": "No recurrence found for this work item"}, status=status.HTTP_404_NOT_FOUND)
+
+        is_active = request.data.get("is_active")
+        if is_active is None:
+            return Response({"error": "is_active is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        recurrence.is_active = bool(is_active)
+        if recurrence.is_active:
+            # Re-activating: schedule the next occurrence from today.
+            today = timezone.now().date()
+            if recurrence.days_of_month:
+                recurrence.next_run_at = next_month_day(today, recurrence.days_of_month)
+            else:
+                recurrence.next_run_at = add_interval(today, recurrence.frequency, recurrence.interval)
+        else:
+            recurrence.next_run_at = None
+        recurrence.save(update_fields=["is_active", "next_run_at", "updated_at"])
+
+        return Response({"recurrence": self._serialize(recurrence)}, status=status.HTTP_200_OK)

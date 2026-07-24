@@ -14,6 +14,7 @@ import type {
   TIssue,
   TIssueActivity,
   TIssueLink,
+  TIssueRecurrenceDetail,
   TIssueServiceType,
   TIssuesResponse,
   TIssueSubIssues,
@@ -31,6 +32,31 @@ export class IssueService extends APIService {
 
   async createIssue(workspaceSlug: string, projectId: string, data: Partial<TIssue>): Promise<TIssue> {
     return this.post(`/api/workspaces/${workspaceSlug}/projects/${projectId}/${this.serviceType}/`, data)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async getIssueRecurrence(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string
+  ): Promise<{ recurrence: TIssueRecurrenceDetail | null }> {
+    return this.get(`/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/recurrence/`)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async updateIssueRecurrence(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    data: { is_active: boolean }
+  ): Promise<{ recurrence: TIssueRecurrenceDetail | null }> {
+    return this.patch(`/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/recurrence/`, data)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

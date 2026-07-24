@@ -9,13 +9,13 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { FormProvider, useForm } from "react-hook-form";
 // editor
-import { ETabIndices, DEFAULT_WORK_ITEM_FORM_VALUES } from "@plane/constants";
+import { ETabIndices, DEFAULT_WORK_ITEM_FORM_VALUES, DEFAULT_RECURRENCE_VALUES } from "@plane/constants";
 import type { EditorRefApi } from "@plane/editor";
 // i18n
 import { useTranslation } from "@plane/i18n";
 import { Button } from "@plane/propel/button";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
-import type { TIssue, TWorkspaceDraftIssue } from "@plane/types";
+import type { TIssue, TIssueRecurrence, TWorkspaceDraftIssue } from "@plane/types";
 // hooks
 import { ToggleSwitch } from "@plane/ui";
 import {
@@ -33,6 +33,7 @@ import {
   IssueParentTag,
   IssueProjectSelect,
   IssueTitleInput,
+  RecurrenceSelect,
 } from "@/components/issues/issue-modal/components";
 // helpers
 // hooks
@@ -105,6 +106,9 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   // states
   const [gptAssistantModal, setGptAssistantModal] = useState(false);
   const [isMoving, setIsMoving] = useState<boolean>(false);
+  // recurrence (create-only)
+  const [isRecurring, setIsRecurring] = useState<boolean>(false);
+  const [recurrence, setRecurrence] = useState<TIssueRecurrence>(DEFAULT_RECURRENCE_VALUES);
 
   // refs
   const editorRef = useRef<EditorRefApi>(null);
@@ -251,29 +255,40 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     // this condition helps to move the issues from draft to project issues
     if (formData.hasOwnProperty("is_draft")) submitData.is_draft = formData.is_draft;
 
-    await onSubmit(submitData, is_draft_issue)
-      .then(() => {
-        setGptAssistantModal(false);
-        if (isCreateMoreToggleEnabled && workItemTemplateId) {
-          handleTemplateChange({
-            workspaceSlug: workspaceSlug?.toString(),
-            reset,
-            editorRef,
-          });
-        } else {
-          reset({
-            ...DEFAULT_WORK_ITEM_FORM_VALUES,
-            ...(isCreateMoreToggleEnabled ? { ...data } : {}),
-            project_id: getValues<"project_id">("project_id"),
-            type_id: getValues<"type_id">("type_id"),
-            description_html: data?.description_html ?? "<p></p>",
-          });
-          editorRef?.current?.clearEditor();
-        }
-      })
-      .catch((error) => {
-        console.error(error);
-      });
+    // attach the recurrence rule on create when the toggle is enabled.
+    // start_date falls back to the work item's start date.
+    if (!data?.id && isRecurring && !is_draft_issue) {
+      submitData.recurrence = {
+        ...recurrence,
+        start_date: recurrence.start_date ?? formData.start_date ?? null,
+      };
+    }
+
+    try {
+      await onSubmit(submitData, is_draft_issue);
+      setGptAssistantModal(false);
+      // reset recurrence for the next work item (relevant with "Create more").
+      setIsRecurring(false);
+      setRecurrence(DEFAULT_RECURRENCE_VALUES);
+      if (isCreateMoreToggleEnabled && workItemTemplateId) {
+        handleTemplateChange({
+          workspaceSlug: workspaceSlug?.toString(),
+          reset,
+          editorRef,
+        });
+      } else {
+        reset({
+          ...DEFAULT_WORK_ITEM_FORM_VALUES,
+          ...(isCreateMoreToggleEnabled ? { ...data } : {}),
+          project_id: getValues<"project_id">("project_id"),
+          type_id: getValues<"type_id">("type_id"),
+          description_html: data?.description_html ?? "<p></p>",
+        });
+        editorRef?.current?.clearEditor();
+      }
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   const handleMoveToProjects = async () => {
@@ -334,15 +349,15 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     const issue = getIssueById(parentId);
     if (!issue) return;
 
-    const projectDetails = getProjectById(issue.project_id);
-    if (!projectDetails) return;
+    const parentProjectDetails = getProjectById(issue.project_id);
+    if (!parentProjectDetails) return;
 
     const stateDetails = getStateById(issue.state_id);
 
     setSelectedParentIssue(
-      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, projectDetails, stateDetails)
+      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, parentProjectDetails, stateDetails)
     );
-  }, [watch, getIssueById, getProjectById, selectedParentIssue, getStateById]);
+  }, [watch, getIssueById, getProjectById, selectedParentIssue, getStateById, setSelectedParentIssue, workspaceSlug]);
 
   // executing this useEffect when isDirty changes
   useEffect(() => {
@@ -380,7 +395,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
         <div className="w-full rounded-lg">
           <form
             ref={formRef}
-            onSubmit={handleSubmit((data) => handleFormSubmit(data))}
+            onSubmit={handleSubmit((formValues) => handleFormSubmit(formValues))}
             className="flex w-full flex-col"
           >
             <div className="rounded-t-lg bg-surface-1 p-5">
@@ -507,22 +522,42 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   setSelectedParentIssue={setSelectedParentIssue}
                 />
               </div>
+              {!data?.id && isRecurring && (
+                <div className="pb-3">
+                  <RecurrenceSelect value={recurrence} onChange={setRecurrence} />
+                </div>
+              )}
               {showActionButtons && (
                 <div
                   className="flex items-center justify-end gap-4 border-t-[0.5px] border-subtle pt-6 pb-3"
                   tabIndex={getIndex("create_more")}
                 >
+                  {!data?.id && !isDraft && (
+                    <div className="inline-flex items-center gap-1.5">
+                      <ToggleSwitch value={isRecurring} onChange={(value) => setIsRecurring(value)} size="sm" />
+                      <button
+                        type="button"
+                        className="cursor-pointer text-caption-sm-regular"
+                        onClick={() => setIsRecurring((prev) => !prev)}
+                      >
+                        {t("recurring")}
+                      </button>
+                    </div>
+                  )}
                   {!data?.id && (
-                    <div
-                      className="inline-flex cursor-pointer items-center gap-1.5"
-                      onClick={() => onCreateMoreToggleChange(!isCreateMoreToggleEnabled)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") onCreateMoreToggleChange(!isCreateMoreToggleEnabled);
-                      }}
-                      role="button"
-                    >
-                      <ToggleSwitch value={isCreateMoreToggleEnabled} onChange={() => {}} size="sm" />
-                      <span className="text-caption-sm-regular">{t("create_more")}</span>
+                    <div className="inline-flex items-center gap-1.5">
+                      <ToggleSwitch
+                        value={isCreateMoreToggleEnabled}
+                        onChange={(value) => onCreateMoreToggleChange(value)}
+                        size="sm"
+                      />
+                      <button
+                        type="button"
+                        className="cursor-pointer text-caption-sm-regular"
+                        onClick={() => onCreateMoreToggleChange(!isCreateMoreToggleEnabled)}
+                      >
+                        {t("create_more")}
+                      </button>
                     </div>
                   )}
                   <div className="flex items-center gap-2">
