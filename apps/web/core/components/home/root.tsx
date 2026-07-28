@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import { useEffect } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
@@ -11,6 +12,7 @@ import useSWR from "swr";
 import { ContentWrapper } from "@plane/ui";
 // hooks
 import { useHome } from "@/hooks/store/use-home";
+import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 import { useUserProfile, useUser } from "@/hooks/store/user";
 // plane web imports
 import { HomePeekOverviewsRoot } from "@/plane-web/components/home";
@@ -25,6 +27,7 @@ export const WorkspaceHomeView = observer(function WorkspaceHomeView() {
   const { data: currentUser } = useUser();
   const { data: currentUserProfile, updateTourCompleted } = useUserProfile();
   const { fetchWidgets } = useHome();
+  const { getAllAndMentionedNotifications, setIsInboxPreviewOpen } = useWorkspaceNotifications();
 
   useSWR(
     workspaceSlug ? `HOME_DASHBOARD_WIDGETS_${workspaceSlug}` : null,
@@ -35,6 +38,31 @@ export const WorkspaceHomeView = observer(function WorkspaceHomeView() {
       revalidateOnReconnect: true,
     }
   );
+
+  // Fetch notifications on landing on the home page so the inbox icon's hover
+  // preview has data ready without waiting for the dedicated notifications page.
+  useSWR(
+    workspaceSlug ? `HOME_NOTIFICATIONS_PREVIEW_${workspaceSlug}` : null,
+    workspaceSlug ? () => getAllAndMentionedNotifications(workspaceSlug?.toString()) : null,
+    {
+      revalidateIfStale: true,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: true,
+    }
+  );
+
+  // Auto-show the inbox hover-preview panel for a few seconds every time the
+  // home page is landed on / navigated to, so recent notifications surface
+  // without requiring the user to hover the icon themselves.
+  useEffect(() => {
+    if (!workspaceSlug) return;
+    setIsInboxPreviewOpen(true);
+    const timeoutId = setTimeout(() => setIsInboxPreviewOpen(false), 5000);
+    return () => {
+      clearTimeout(timeoutId);
+      setIsInboxPreviewOpen(false);
+    };
+  }, [workspaceSlug, setIsInboxPreviewOpen]);
 
   const handleTourCompleted = async () => {
     try {

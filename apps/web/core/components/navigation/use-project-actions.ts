@@ -18,6 +18,7 @@ type UseProjectActionsProps = {
 export const useProjectActions = ({ workspaceSlug, projectId, activeItem }: UseProjectActionsProps) => {
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [leaveProjectModalOpen, setLeaveProjectModalOpen] = useState(false);
+  const [cloneProjectModalOpen, setCloneProjectModalOpen] = useState(false);
 
   const handleLeaveProject = useCallback(() => {
     setLeaveProjectModalOpen(true);
@@ -50,12 +51,18 @@ export const useProjectActions = ({ workspaceSlug, projectId, activeItem }: UseP
     setLeaveProjectModalOpen(open);
   }, []);
 
+  const handleCloneProjectModal = useCallback((open: boolean) => {
+    setCloneProjectModalOpen(open);
+  }, []);
+
   return {
     publishModalOpen,
     leaveProjectModalOpen,
+    cloneProjectModalOpen,
     handleLeaveProject,
     handleCopyText,
     handlePublishModal,
     handleLeaveProjectModal,
+    handleCloneProjectModal,
   };
 };

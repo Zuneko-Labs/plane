@@ -15,7 +15,7 @@ from django.utils import timezone
 
 # Module imports
 from plane.bgtasks.issue_activities_task import issue_activity
-from plane.db.models import Issue, Project, State
+from plane.db.models import Issue, Project, State, StateGroup
 from plane.utils.exception_logger import log_exception
 
 
@@ -23,6 +23,11 @@ from plane.utils.exception_logger import log_exception
 def archive_and_close_old_issues():
     archive_old_issues()
     close_old_issues()
+
+
+@shared_task
+def move_overdue_issues():
+    move_overdue_issues_to_backlog()
 
 
 def archive_old_issues():
@@ -74,6 +79,50 @@ def archive_old_issues():
                             issue_id=issue.id,
                             project_id=project_id,
                             current_instance=json.dumps({"archived_at": None}),
+                            subscriber=False,
+                            epoch=int(timezone.now().timestamp()),
+                            notification=True,
+                        )
+                        for issue in issues_to_update
+                    ]
+        return
+    except Exception as e:
+        log_exception(e)
+        return
+
+
+def move_overdue_issues_to_backlog():
+    try:
+        for project in Project.objects.all():
+            backlog_state = State.objects.filter(project=project, group=StateGroup.BACKLOG.value).first()
+
+            # Project has no backlog state to move issues into
+            if backlog_state is None:
+                continue
+
+            issues = Issue.issue_objects.filter(
+                project=project,
+                archived_at__isnull=True,
+                target_date__lt=timezone.now().date(),
+                state__group__in=["unstarted", "started"],
+            )
+
+            if issues:
+                issues_to_update = []
+                for issue in issues:
+                    issue.state = backlog_state
+                    issues_to_update.append(issue)
+
+                if issues_to_update:
+                    Issue.objects.bulk_update(issues_to_update, ["state"], batch_size=100)
+                    [
+                        issue_activity.delay(
+                            type="issue.activity.updated",
+                            requested_data=json.dumps({"state_id": str(backlog_state.id), "automation": True}),
+                            actor_id=str(project.created_by_id),
+                            issue_id=issue.id,
+                            project_id=project.id,
+                            current_instance=None,
                             subscriber=False,
                             epoch=int(timezone.now().timestamp()),
                             notification=True,

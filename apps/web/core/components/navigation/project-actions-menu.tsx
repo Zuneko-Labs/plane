@@ -6,7 +6,7 @@
 
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router";
-import { LogOut, MoreHorizontal, Settings, Share2, ArchiveIcon } from "lucide-react";
+import { Copy, LogOut, MoreHorizontal, Settings, Share2, ArchiveIcon } from "lucide-react";
 // plane imports
 import { MEMBER_TRACKER_ELEMENTS } from "@plane/constants";
 import { useTranslation } from "@plane/i18n";
@@ -23,6 +23,7 @@ type Props = {
   onCopyText: () => void;
   onLeaveProject: () => void;
   onPublishModal: () => void;
+  onCloneProject: () => void;
 };
 
 export function ProjectActionsMenu({
@@ -33,26 +34,28 @@ export function ProjectActionsMenu({
   onCopyText,
   onLeaveProject,
   onPublishModal,
+  onCloneProject,
 }: Props) {
   // states
   const [isMenuActive, setIsMenuActive] = useState(false);
   // translation
   const { t } = useTranslation();
   // refs
-  const actionSectionRef = useRef<HTMLDivElement | null>(null);
+  const actionSectionRef = useRef<HTMLButtonElement | null>(null);
   // router
   const navigate = useNavigate();
 
   return (
     <CustomMenu
       customButton={
-        <span
+        <button
+          type="button"
           ref={actionSectionRef}
           className="grid place-items-center rounded-sm p-0.5 text-placeholder hover:bg-layer-1"
           onClick={() => setIsMenuActive(!isMenuActive)}
         >
           <MoreHorizontal className="size-4" />
-        </span>
+        </button>
       }
       className="flex-shrink-0"
       customButtonClassName="grid place-items-center"
@@ -79,6 +82,14 @@ export function ProjectActionsMenu({
           <span>{t("copy_link")}</span>
         </span>
       </CustomMenu.MenuItem>
+      {isAdmin && (
+        <CustomMenu.MenuItem onClick={onCloneProject}>
+          <div className="flex cursor-pointer items-center justify-start gap-2">
+            <Copy className="h-3.5 w-3.5 stroke-[1.5]" />
+            <span>{t("clone_project")}</span>
+          </div>
+        </CustomMenu.MenuItem>
+      )}
       {isAuthorized && (
         <CustomMenu.MenuItem
           onClick={() => {

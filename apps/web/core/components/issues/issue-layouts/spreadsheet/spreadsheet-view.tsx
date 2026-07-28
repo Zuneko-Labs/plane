@@ -106,6 +106,7 @@ export const SpreadsheetView = observer(function SpreadsheetView(props: Props) {
                 spreadsheetColumnsList={spreadsheetColumnsList}
                 selectionHelpers={helpers}
                 isEpic={isEpic}
+                isWorkspaceLevel={isWorkspaceLevel}
               />
             </div>
             <div className="border-t border-subtle">

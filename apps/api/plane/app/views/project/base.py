@@ -23,6 +23,7 @@ from plane.app.serializers import (
     ProjectSerializer,
 )
 from plane.app.views.base import BaseAPIView, BaseViewSet
+from plane.bgtasks.project_clone_task import clone_project_data
 from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.bgtasks.webhook_task import model_activity, webhook_activity
 from plane.db.models import (
@@ -310,6 +311,65 @@ class ProjectViewSet(BaseViewSet):
             serializer = ProjectListSerializer(project)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER], level="WORKSPACE")
+    def clone(self, request, slug, project_id):
+        workspace = Workspace.objects.get(slug=slug)
+        source_project = Project.objects.get(pk=project_id, workspace=workspace)
+
+        # Create the new project with the source project's general/feature/work-structure settings,
+        # skipping identity fields (name/identifier come from the request, like a normal create)
+        serializer = ProjectSerializer(
+            data={
+                **request.data,
+                "network": source_project.network,
+                "emoji": source_project.emoji,
+                "icon_prop": source_project.icon_prop,
+                "logo_props": source_project.logo_props,
+                "cover_image": source_project.cover_image,
+                "cover_image_asset": source_project.cover_image_asset_id,
+                "archive_in": source_project.archive_in,
+                "close_in": source_project.close_in,
+                "timezone": source_project.timezone,
+                "module_view": source_project.module_view,
+                "cycle_view": source_project.cycle_view,
+                "issue_views_view": source_project.issue_views_view,
+                "page_view": source_project.page_view,
+                "intake_view": source_project.intake_view,
+                "guest_view_all_features": source_project.guest_view_all_features,
+                "is_time_tracking_enabled": source_project.is_time_tracking_enabled,
+                "is_issue_type_enabled": source_project.is_issue_type_enabled,
+            },
+            context={"workspace_id": workspace.id},
+        )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+        new_project = serializer.instance
+
+        # Only the cloning user becomes a member (admin) of the new project
+        ProjectMember.objects.create(project=new_project, member=request.user, role=ROLE.ADMIN.value)
+
+        clone_project_data.delay(
+            source_project_id=str(source_project.id),
+            new_project_id=str(new_project.id),
+            actor_id=str(request.user.id),
+        )
+
+        model_activity.delay(
+            model_name="project",
+            model_id=str(new_project.id),
+            requested_data=request.data,
+            current_instance=None,
+            actor_id=request.user.id,
+            slug=slug,
+            origin=base_host(request=request, is_app=True),
+        )
+
+        project = self.get_queryset().filter(pk=new_project.id).first()
+        serializer = ProjectListSerializer(project)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     def partial_update(self, request, slug, pk=None):
         # try:

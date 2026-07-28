@@ -39,6 +39,7 @@ export interface IWorkspaceNotificationStore {
   currentSelectedNotificationId: string | undefined;
   paginationInfo: Omit<TNotificationPaginatedInfo, "results"> | undefined;
   filters: TNotificationFilter;
+  isInboxPreviewOpen: boolean;
   // computed
   // computed functions
   notificationIdsByWorkspaceId: (workspaceId: string) => string[] | undefined;
@@ -51,12 +52,14 @@ export interface IWorkspaceNotificationStore {
   setCurrentNotificationTab: (tab: TNotificationTab) => void;
   setCurrentSelectedNotificationId: (notificationId: string | undefined) => void;
   setUnreadNotificationsCount: (type: "increment" | "decrement", newCount?: number) => void;
+  setIsInboxPreviewOpen: (isOpen: boolean) => void;
   getUnreadNotificationsCount: (workspaceSlug: string) => Promise<TUnreadNotificationsCount | undefined>;
   getNotifications: (
     workspaceSlug: string,
     loader?: TNotificationLoader,
     queryCursorType?: TNotificationQueryParamType
   ) => Promise<TNotificationPaginatedInfo | undefined>;
+  getAllAndMentionedNotifications: (workspaceSlug: string) => Promise<void>;
   markAllNotificationsAsRead: (workspaceId: string) => Promise<void>;
 }
 
@@ -83,6 +86,7 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
     archived: false,
     read: false,
   };
+  isInboxPreviewOpen: boolean = false;
 
   constructor(protected store: CoreRootStore) {
     makeObservable(this, {
@@ -90,6 +94,7 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
       loader: observable.ref,
       unreadNotificationsCount: observable,
       notifications: observable,
+      isInboxPreviewOpen: observable.ref,
       currentNotificationTab: observable.ref,
       currentSelectedNotificationId: observable,
       paginationInfo: observable,
@@ -99,12 +104,14 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
       setCurrentNotificationTab: action,
       setCurrentSelectedNotificationId: action,
       setUnreadNotificationsCount: action,
+      setIsInboxPreviewOpen: action,
       mutateNotifications: action,
       updateFilters: action,
       updateBulkFilters: action,
       // actions
       getUnreadNotificationsCount: action,
       getNotifications: action,
+      getAllAndMentionedNotifications: action,
       markAllNotificationsAsRead: action,
     });
   }
@@ -141,9 +148,9 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
           }
         } else {
           if (this.filters.snoozed) {
-            return n.snoozed_till ? true : false;
+            return !!n.snoozed_till;
           } else if (this.filters.archived) {
-            return n.archived_at ? true : false;
+            return !!n.archived_at;
           } else {
             return true;
           }
@@ -281,6 +288,15 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
   };
 
   /**
+   * @description set whether the inbox hover-preview panel is open (used to auto-show it on home page landing)
+   * @param { boolean } isOpen
+   * @returns { void }
+   */
+  setIsInboxPreviewOpen = (isOpen: boolean): void => {
+    set(this, "isInboxPreviewOpen", isOpen);
+  };
+
+  /**
    * @description set unread notifications count
    * @param { "increment" | "decrement" } type
    * @returns { void }
@@ -359,6 +375,31 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
       throw error;
     } finally {
       runInAction(() => (this.loader = undefined));
+    }
+  };
+
+  /**
+   * @description fetch both the default (non-mentioned) and mentioned notification sets and
+   * merge them into the store. The regular `getNotifications` call only fetches one or the
+   * other (the backend excludes mentions unless `mentioned=true` is explicitly passed), which
+   * isn't enough for a combined preview that needs to show both kinds together.
+   * @param { string } workspaceSlug
+   * @returns { Promise<void> }
+   */
+  getAllAndMentionedNotifications = async (workspaceSlug: string): Promise<void> => {
+    try {
+      const baseParams = this.generateNotificationQueryParams(ENotificationQueryParamType.INIT);
+      await this.getUnreadNotificationsCount(workspaceSlug);
+      const [defaultResponse, mentionedResponse] = await Promise.all([
+        workspaceNotificationService.fetchNotifications(workspaceSlug, { ...baseParams, mentioned: false }),
+        workspaceNotificationService.fetchNotifications(workspaceSlug, { ...baseParams, mentioned: true }),
+      ]);
+      runInAction(() => {
+        if (defaultResponse?.results) this.mutateNotifications(defaultResponse.results);
+        if (mentionedResponse?.results) this.mutateNotifications(mentionedResponse.results);
+      });
+    } catch (error) {
+      console.error("WorkspaceNotificationStore -> getAllAndMentionedNotifications -> error", error);
     }
   };
 

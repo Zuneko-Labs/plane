@@ -31,14 +31,16 @@ export type TCreateProjectFormProps = {
   handleNextStep: (projectId: string) => void;
   data?: Partial<TProject>;
   templateId?: string;
+  cloneFromProjectId?: string;
   updateCoverImageStatus: (projectId: string, coverImage: string) => Promise<void>;
 };
 
 export const CreateProjectForm = observer(function CreateProjectForm(props: TCreateProjectFormProps) {
-  const { setToFavorite, workspaceSlug, data, onClose, handleNextStep, updateCoverImageStatus } = props;
+  const { setToFavorite, workspaceSlug, data, onClose, handleNextStep, cloneFromProjectId, updateCoverImageStatus } =
+    props;
   // store
   const { t } = useTranslation();
-  const { addProjectToFavorites, createProject, updateProject } = useProject();
+  const { addProjectToFavorites, createProject, cloneProject, updateProject } = useProject();
   // states
   const [shouldAutoSyncIdentifier, setShouldAutoSyncIdentifier] = useState(true);
   // form info
@@ -78,13 +80,10 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
             isUserAsset: false,
           });
         } catch (error) {
+          // A cover image is decorative — failing to upload it must never block project
+          // creation. Skip attaching it and continue creating the project without one.
           console.error("Error uploading cover image:", error);
-          setToast({
-            type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: error instanceof Error ? error.message : "Failed to upload cover image",
-          });
-          return Promise.reject(error);
+          uploadedAssetUrl = null;
         }
       } else {
         formData.cover_image = coverImage;
@@ -92,7 +91,11 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
       }
     }
 
-    return createProject(workspaceSlug.toString(), formData)
+    const submitProject = cloneFromProjectId
+      ? cloneProject(workspaceSlug.toString(), cloneFromProjectId, formData)
+      : createProject(workspaceSlug.toString(), formData);
+
+    return submitProject
       .then(async (res) => {
         try {
           if (uploadedAssetUrl) {
@@ -110,7 +113,9 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: t("success"),
-          message: t("project_created_successfully"),
+          message: cloneFromProjectId
+            ? "Project clone started. You'll be notified once it's fully populated."
+            : t("project_created_successfully"),
         });
 
         if (setToFavorite) {

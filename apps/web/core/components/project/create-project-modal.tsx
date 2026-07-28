@@ -27,6 +27,7 @@ type Props = {
   workspaceSlug: string;
   data?: Partial<TProject>;
   templateId?: string;
+  cloneFromProjectId?: string;
 };
 
 enum EProjectCreationSteps {
@@ -35,7 +36,7 @@ enum EProjectCreationSteps {
 }
 
 export function CreateProjectModal(props: Props) {
-  const { isOpen, onClose, setToFavorite = false, workspaceSlug, data, templateId } = props;
+  const { isOpen, onClose, setToFavorite = false, workspaceSlug, data, templateId, cloneFromProjectId } = props;
   // states
   const [currentStep, setCurrentStep] = useState<EProjectCreationSteps>(EProjectCreationSteps.CREATE_PROJECT);
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
@@ -49,6 +50,12 @@ export function CreateProjectModal(props: Props) {
 
   const handleNextStep = (projectId: string) => {
     if (!projectId) return;
+    // Cloned projects already carry the source project's feature settings, so skip the
+    // feature-selection step and let the background job populate everything else.
+    if (cloneFromProjectId) {
+      onClose();
+      return;
+    }
     setCreatedProjectId(projectId);
     setCurrentStep(EProjectCreationSteps.FEATURE_SELECTION);
   };
@@ -76,6 +83,7 @@ export function CreateProjectModal(props: Props) {
           handleNextStep={handleNextStep}
           data={data}
           templateId={templateId}
+          cloneFromProjectId={cloneFromProjectId}
         />
       )}
       {currentStep === EProjectCreationSteps.FEATURE_SELECTION && (

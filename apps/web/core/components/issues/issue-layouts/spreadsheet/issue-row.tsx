@@ -54,6 +54,7 @@ interface Props {
   selectionHelpers: TSelectionHelper;
   shouldRenderByDefault?: boolean;
   isEpic?: boolean;
+  isWorkspaceLevel?: boolean;
 }
 
 export const SpreadsheetIssueRow = observer(function SpreadsheetIssueRow(props: Props) {
@@ -73,6 +74,7 @@ export const SpreadsheetIssueRow = observer(function SpreadsheetIssueRow(props: 
     selectionHelpers,
     shouldRenderByDefault,
     isEpic = false,
+    isWorkspaceLevel = false,
   } = props;
   // states
   const [isExpanded, setExpanded] = useState<boolean>(false);
@@ -125,6 +127,7 @@ export const SpreadsheetIssueRow = observer(function SpreadsheetIssueRow(props: 
           spreadsheetColumnsList={spreadsheetColumnsList}
           selectionHelpers={selectionHelpers}
           isEpic={isEpic}
+          isWorkspaceLevel={isWorkspaceLevel}
         />
       </RenderIfVisible>
 
@@ -147,6 +150,7 @@ export const SpreadsheetIssueRow = observer(function SpreadsheetIssueRow(props: 
             spreadsheetColumnsList={spreadsheetColumnsList}
             selectionHelpers={selectionHelpers}
             shouldRenderByDefault={isExpanded}
+            isWorkspaceLevel={isWorkspaceLevel}
           />
         ))}
     </>
@@ -169,6 +173,7 @@ interface IssueRowDetailsProps {
   spacingLeft?: number;
   selectionHelpers: TSelectionHelper;
   isEpic?: boolean;
+  isWorkspaceLevel?: boolean;
 }
 
 const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetailsProps) {
@@ -188,12 +193,13 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
     spacingLeft = 6,
     selectionHelpers,
     isEpic = false,
+    isWorkspaceLevel = false,
   } = props;
   // states
   const [isMenuActive, setIsMenuActive] = useState(false);
   // refs
   const cellRef = useRef(null);
-  const menuActionRef = useRef<HTMLDivElement | null>(null);
+  const menuActionRef = useRef<HTMLButtonElement | null>(null);
   // router
   const { workspaceSlug, projectId } = useParams();
   // hooks
@@ -215,7 +221,8 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
   useOutsideClickDetector(menuActionRef, () => setIsMenuActive(false));
 
   const customActionButton = (
-    <div
+    <button
+      type="button"
       ref={menuActionRef}
       className={`flex h-full w-full cursor-pointer items-center rounded-sm p-1 text-placeholder hover:bg-layer-1 ${
         isMenuActive ? "bg-layer-1 text-primary" : "text-secondary"
@@ -223,7 +230,7 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
       onClick={() => setIsMenuActive(!isMenuActive)}
     >
       <MoreHorizontal className="h-3.5 w-3.5" />
-    </div>
+    </button>
   );
   if (!issueDetail) return null;
 
@@ -259,12 +266,20 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
 
   return (
     <>
+      {isWorkspaceLevel && (
+        <td className="relative left-0 z-10 h-11 min-w-36 border border-t-0 border-b-[0.5px] border-subtle-1 bg-surface-1 px-2 text-13 md:sticky">
+          {projectIdentifier}
+        </td>
+      )}
       {/* Single sticky column containing both identifier and workitem */}
       <td
         id={`issue-${issueId}`}
         ref={cellRef}
         tabIndex={0}
-        className="group/list-block relative left-0 z-10 max-w-lg bg-surface-1 md:sticky"
+        className={cn("group/list-block relative max-w-lg bg-surface-1", {
+          "left-36 z-10 md:sticky": isWorkspaceLevel,
+          "left-0 z-10 md:sticky": !isWorkspaceLevel,
+        })}
       >
         <ControlLink
           href={workItemLink}
@@ -371,8 +386,10 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
                   </div>
                 </div>
                 <div
+                  role="presentation"
                   className={`opacity-0 transition-opacity group-hover:opacity-100 ${isMenuActive ? "!opacity-100" : ""}`}
                   onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
                 >
                   {quickActions({
                     issue: issueDetail,

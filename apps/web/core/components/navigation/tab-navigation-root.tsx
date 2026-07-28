@@ -18,6 +18,7 @@ import { useUserPermissions } from "@/hooks/store/user";
 // plane web imports
 import { useNavigationItems } from "@/plane-web/components/navigations";
 // local imports
+import { CreateProjectModal } from "../project/create-project-modal";
 import { LeaveProjectModal } from "../project/leave-project-modal";
 import { PublishProjectModal } from "../project/publish-project/modal";
 import { ProjectActionsMenu } from "./project-actions-menu";
@@ -96,10 +97,12 @@ export const TabNavigationRoot = observer(function TabNavigationRoot(props: TTab
   const {
     publishModalOpen,
     leaveProjectModalOpen,
+    cloneProjectModalOpen,
     handleLeaveProject,
     handleCopyText,
     handlePublishModal,
     handleLeaveProjectModal,
+    handleCloneProjectModal,
   } = useProjectActions({
     workspaceSlug,
     projectId,
@@ -109,6 +112,7 @@ export const TabNavigationRoot = observer(function TabNavigationRoot(props: TTab
   // Filter and sort navigation items
   const allNavigationItems = navigationItems
     .filter((item) => item.shouldRender)
+    // eslint-disable-next-line unicorn/no-array-sort -- `.filter()` above always returns a fresh array, so sorting it in place is safe (no shared/mutated state); `toSorted()` isn't available in this project's configured TS lib target
     .sort((a, b) => a.sortOrder - b.sortOrder);
 
   // Split items into two categories:
@@ -168,6 +172,13 @@ export const TabNavigationRoot = observer(function TabNavigationRoot(props: TTab
         isOpen={leaveProjectModalOpen}
         onClose={() => handleLeaveProjectModal(false)}
       />
+      <CreateProjectModal
+        isOpen={cloneProjectModalOpen}
+        onClose={() => handleCloneProjectModal(false)}
+        workspaceSlug={workspaceSlug}
+        cloneFromProjectId={projectId}
+        data={{ name: `Copy of ${project.name}` }}
+      />
 
       {/* container for the tab navigation */}
       <div className="flex size-full items-center gap-3 overflow-hidden">
@@ -182,6 +193,7 @@ export const TabNavigationRoot = observer(function TabNavigationRoot(props: TTab
               onCopyText={handleCopyText}
               onLeaveProject={handleLeaveProject}
               onPublishModal={() => handlePublishModal(true)}
+              onCloneProject={() => handleCloneProjectModal(true)}
             />
           </div>
         </div>

@@ -69,6 +69,7 @@ export interface IProjectStore {
   updateProjectView: (workspaceSlug: string, projectId: string, viewProps: any) => Promise<any>;
   // CRUD actions
   createProject: (workspaceSlug: string, data: Partial<TProject>) => Promise<TProject>;
+  cloneProject: (workspaceSlug: string, sourceProjectId: string, data: Partial<TProject>) => Promise<TProject>;
   updateProject: (workspaceSlug: string, projectId: string, data: Partial<TProject>) => Promise<TProject>;
   deleteProject: (workspaceSlug: string, projectId: string) => Promise<void>;
   // archive actions
@@ -129,6 +130,7 @@ export class ProjectStore implements IProjectStore {
       updateProjectView: action,
       // CRUD actions
       createProject: action,
+      cloneProject: action,
       updateProject: action,
       // collapsible actions
       setOpenCollapsibleSection: action,
@@ -544,6 +546,25 @@ export class ProjectStore implements IProjectStore {
   };
 
   /**
+   * Clones an existing project's settings, cycles, modules, views, pages, intake, and work
+   * items into a brand new project (populated asynchronously by a background job)
+   * @param workspaceSlug
+   * @param sourceProjectId
+   * @param data
+   * @returns Promise<TProject>
+   */
+  cloneProject = async (workspaceSlug: string, sourceProjectId: string, data: Partial<TProject>) => {
+    try {
+      const response = await this.projectService.cloneProject(workspaceSlug, sourceProjectId, data);
+      this.processProjectAfterCreation(workspaceSlug, response);
+      return response;
+    } catch (error) {
+      console.log("Failed to clone project from project store");
+      throw error;
+    }
+  };
+
+  /**
    * Updates a details of a project and updates it in the store
    * @param workspaceSlug
    * @param projectId
@@ -607,6 +628,7 @@ export class ProjectStore implements IProjectStore {
           set(this.projectMap, [projectId, "archived_at"], response.archived_at);
           this.rootStore.favorite.removeFavoriteFromStore(projectId);
         });
+        return;
       })
       .catch((error) => {
         console.log("Failed to archive project from project store");
@@ -627,6 +649,7 @@ export class ProjectStore implements IProjectStore {
         runInAction(() => {
           set(this.projectMap, [projectId, "archived_at"], null);
         });
+        return;
       })
       .catch((error) => {
         console.log("Failed to restore project from project store");
