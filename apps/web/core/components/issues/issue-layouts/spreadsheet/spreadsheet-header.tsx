@@ -26,6 +26,7 @@ interface Props {
   spreadsheetColumnsList: (keyof IIssueDisplayProperties)[];
   selectionHelpers: TSelectionHelper;
   isEpic?: boolean;
+  isWorkspaceLevel?: boolean;
 }
 
 export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Props) {
@@ -38,6 +39,7 @@ export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Prop
     spreadsheetColumnsList,
     selectionHelpers,
     isEpic = false,
+    isWorkspaceLevel = false,
   } = props;
   // router
   const { projectId } = useParams();
@@ -49,9 +51,21 @@ export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Prop
   return (
     <thead className="sticky top-0 left-0 z-[12] border-b-[0.5px] border-subtle">
       <tr>
+        {isWorkspaceLevel && (
+          <th
+            className="left-0 z-[15] h-11 min-w-36 items-center border border-t-0 border-b-0 border-subtle bg-layer-1 py-1 text-13 font-medium md:sticky"
+            tabIndex={-1}
+          >
+            <div className="flex h-full w-full items-center px-2">Project</div>
+          </th>
+        )}
+
         {/* Single header column containing both identifier and workitem */}
         <th
-          className="group/list-header left-0 z-[15] h-11 min-w-60 border-r-[0.5px] border-subtle bg-layer-1 text-13 font-medium md:sticky"
+          className={cn(
+            "group/list-header z-[15] h-11 min-w-60 border-r-[0.5px] border-subtle bg-layer-1 text-13 font-medium md:sticky",
+            { "left-36": isWorkspaceLevel, "left-0": !isWorkspaceLevel }
+          )}
           tabIndex={-1}
         >
           <div className="flex h-full w-full items-center gap-2 px-page-x">

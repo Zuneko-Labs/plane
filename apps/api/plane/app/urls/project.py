@@ -125,6 +125,11 @@ urlpatterns = [
         name="project-archive-unarchive",
     ),
     path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/clone/",
+        ProjectViewSet.as_view({"post": "clone"}),
+        name="project-clone",
+    ),
+    path(
         "workspaces/<str:slug>/projects/<uuid:project_id>/preferences/member/<uuid:member_id>/",
         ProjectMemberPreferenceEndpoint.as_view(),
         name="project-member-preference",

@@ -9,6 +9,7 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // plane imports
 import {
+  ALL_ISSUES,
   EIssueFilterType,
   ISSUE_DISPLAY_FILTERS_BY_PAGE,
   GLOBAL_VIEW_TRACKER_ELEMENTS,
@@ -44,6 +45,7 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   // store hooks
   const {
     issuesFilter: { filters, updateFilters },
+    issues: { groupedIssueIds },
   } = useIssues(EIssuesStoreType.GLOBAL);
   const { getViewDetailsById, currentWorkspaceViews } = useGlobalView();
   const { t } = useTranslation();
@@ -89,11 +91,18 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
     [workspaceSlug, updateFilters, globalViewId]
   );
 
+  const totalIssuesCount = groupedIssueIds?.[ALL_ISSUES];
+  const totalIssuesCountNumber = Array.isArray(totalIssuesCount) ? totalIssuesCount.length : undefined;
+
   const isLocked = viewDetails?.is_locked;
 
   const isDefaultView = DEFAULT_GLOBAL_VIEWS_LIST.find((view) => view.key === globalViewId);
 
   const defaultViewDetails = DEFAULT_GLOBAL_VIEWS_LIST.find((view) => view.key === globalViewId);
+
+  const breadcrumbTitle = viewDetails?.name ?? t(defaultViewDetails?.i18n_label ?? "");
+  const breadcrumbTitleWithCount =
+    totalIssuesCountNumber !== undefined ? `${breadcrumbTitle}  ${totalIssuesCountNumber}` : breadcrumbTitle;
 
   const defaultOptions = DEFAULT_GLOBAL_VIEWS_LIST.map((view) => ({
     value: view.key,
@@ -136,7 +145,7 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
                   onChange={(value: string) => {
                     router.push(`/${workspaceSlug}/workspace-views/${value}`);
                   }}
-                  title={viewDetails?.name ?? t(defaultViewDetails?.i18n_label ?? "")}
+                  title={breadcrumbTitleWithCount}
                   icon={
                     <Breadcrumbs.Icon>
                       <ViewsIcon className="size-4 flex-shrink-0 text-tertiary" />

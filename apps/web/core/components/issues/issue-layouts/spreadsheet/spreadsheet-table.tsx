@@ -38,6 +38,7 @@ type Props = {
   spreadsheetColumnsList: (keyof IIssueDisplayProperties)[];
   selectionHelpers: TSelectionHelper;
   isEpic?: boolean;
+  isWorkspaceLevel?: boolean;
 };
 
 export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props) {
@@ -57,6 +58,7 @@ export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props)
     spreadsheetColumnsList,
     selectionHelpers,
     isEpic = false,
+    isWorkspaceLevel = false,
   } = props;
 
   // states
@@ -121,6 +123,7 @@ export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props)
         spreadsheetColumnsList={spreadsheetColumnsList}
         selectionHelpers={selectionHelpers}
         isEpic={isEpic}
+        isWorkspaceLevel={isWorkspaceLevel}
       />
       <tbody>
         {issueIds.map((id) => (
@@ -139,13 +142,14 @@ export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props)
             spreadsheetColumnsList={spreadsheetColumnsList}
             selectionHelpers={selectionHelpers}
             isEpic={isEpic}
+            isWorkspaceLevel={isWorkspaceLevel}
           />
         ))}
       </tbody>
       {canLoadMoreIssues && (
         <tfoot ref={setIntersectionElement}>
-          {Array.from({ length: 3 }).map((_, index) => (
-            <SpreadsheetIssueRowLoader key={index} columnCount={displayPropertiesCount} />
+          {["loader-1", "loader-2", "loader-3"].map((loaderKey) => (
+            <SpreadsheetIssueRowLoader key={loaderKey} columnCount={displayPropertiesCount} />
           ))}
         </tfoot>
       )}
