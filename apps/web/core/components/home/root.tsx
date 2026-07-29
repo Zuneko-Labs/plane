@@ -27,7 +27,7 @@ export const WorkspaceHomeView = observer(function WorkspaceHomeView() {
   const { data: currentUser } = useUser();
   const { data: currentUserProfile, updateTourCompleted } = useUserProfile();
   const { fetchWidgets } = useHome();
-  const { getAllAndMentionedNotifications, setIsInboxPreviewOpen } = useWorkspaceNotifications();
+  const { setIsInboxPreviewOpen } = useWorkspaceNotifications();
 
   useSWR(
     workspaceSlug ? `HOME_DASHBOARD_WIDGETS_${workspaceSlug}` : null,
@@ -39,18 +39,9 @@ export const WorkspaceHomeView = observer(function WorkspaceHomeView() {
     }
   );
 
-  // Fetch notifications on landing on the home page so the inbox icon's hover
-  // preview has data ready without waiting for the dedicated notifications page.
-  useSWR(
-    workspaceSlug ? `HOME_NOTIFICATIONS_PREVIEW_${workspaceSlug}` : null,
-    workspaceSlug ? () => getAllAndMentionedNotifications(workspaceSlug?.toString()) : null,
-    {
-      revalidateIfStale: true,
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-    }
-  );
-
+  // Notification data itself is now fetched globally in TopNavigationRoot (rendered on every
+  // page), so it's already available here — this effect only handles the home-page-specific
+  // auto-popup UX.
   // Auto-show the inbox hover-preview panel for a few seconds every time the
   // home page is landed on / navigated to, so recent notifications surface
   // without requiring the user to hover the icon themselves.
