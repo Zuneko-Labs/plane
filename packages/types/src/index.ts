@@ -12,6 +12,7 @@ export * from "./auth";
 export * from "./calendar";
 export * from "./charts";
 export * from "./command-palette";
+export * from "./compliance";
 export * from "./common";
 export * from "./cycle";
 export * from "./dashboard";

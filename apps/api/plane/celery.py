@@ -100,6 +100,10 @@ app.conf.beat_schedule = {
         "task": "plane.bgtasks.issue_automation_task.move_overdue_issues",
         "schedule": crontab(hour=4, minute=0),  # UTC 04:00
     },
+    "check-every-day-to-generate-compliance-issues": {
+        "task": "plane.bgtasks.compliance_task.generate_compliance_issues",
+        "schedule": crontab(hour=4, minute=15),  # UTC 04:15
+    },
 }
 
 

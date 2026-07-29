@@ -278,6 +278,13 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     access: [EUserWorkspaceRoles.ADMIN],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
+  compliance: {
+    key: "compliance",
+    labelTranslationKey: "compliance",
+    href: `/compliance/`,
+    access: [EUserWorkspaceRoles.ADMIN],
+    highlight: (pathname: string, url: string) => pathname.includes(url),
+  },
 };
 
 export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebarNavigationItem[] = [
@@ -287,6 +294,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebarN
 export const WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebarNavigationItem[] = [
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["projects"],
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["team-calendar"],
+  WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["compliance"],
 ];
 
 export const IS_FAVORITE_MENU_OPEN = "is_favorite_menu_open";

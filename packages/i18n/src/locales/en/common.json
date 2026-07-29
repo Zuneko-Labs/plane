@@ -879,5 +879,6 @@
       "description": "Export work items to a JSON file.",
       "short_description": "Export as json"
     }
-  }
+  },
+  "compliance": "Compliance"
 }

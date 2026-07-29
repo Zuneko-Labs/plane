@@ -86,6 +86,13 @@ from .recent_visit import UserRecentVisit
 
 from .label import Label
 
+from .compliance import (
+    ComplianceApplicability,
+    ComplianceCategory,
+    ComplianceRun,
+    ComplianceTemplate,
+)
+
 from .device import Device, DeviceSession
 
 from .sticky import Sticky
