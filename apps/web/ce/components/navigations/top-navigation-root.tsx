@@ -19,6 +19,7 @@ import { InboxIcon } from "@plane/propel/icons";
 import useSWR from "swr";
 import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { NotificationContent } from "@/components/workspace-notifications/sidebar/notification-card/content";
 
 export const TopNavigationRoot = observer(function TopNavigationRoot() {
   // router
@@ -29,6 +30,7 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
   const {
     unreadNotificationsCount,
     getUnreadNotificationsCount,
+    getAllAndMentionedNotifications,
     notifications,
     isInboxPreviewOpen,
     setIsInboxPreviewOpen,
@@ -44,6 +46,19 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
   useSWR(
     workspaceSlug ? "WORKSPACE_UNREAD_NOTIFICATION_COUNT" : null,
     workspaceSlug ? () => getUnreadNotificationsCount(workspaceSlug.toString()) : null
+  );
+
+  // Fetch the notification list itself (not just the unread count) so the hover preview has
+  // data ready on every page, not only after the home page or dedicated notifications page
+  // happens to have populated the store first.
+  useSWR(
+    workspaceSlug ? `TOP_NAV_NOTIFICATIONS_PREVIEW_${workspaceSlug}` : null,
+    workspaceSlug ? () => getAllAndMentionedNotifications(workspaceSlug.toString()) : null,
+    {
+      revalidateIfStale: true,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: true,
+    }
   );
 
   // The backend's "total_unread_notifications_count" is actually just the non-mention bucket —
@@ -133,7 +148,14 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
                     if (!notification) return null;
                     return (
                       <div key={notificationId} className="rounded-md px-2 py-1.5 hover:bg-layer-1">
-                        <p className="line-clamp-1 text-13 text-primary">{notification.title}</p>
+                        <p className="line-clamp-1 text-13 text-primary">
+                          <NotificationContent
+                            notification={notification.asJson}
+                            workspaceId={currentWorkspace?.id ?? ""}
+                            workspaceSlug={workspaceSlug.toString()}
+                            projectId={notification.project ?? ""}
+                          />
+                        </p>
                         <p className="text-11 text-tertiary">{calculateTimeAgo(notification.created_at ?? null)}</p>
                       </div>
                     );
