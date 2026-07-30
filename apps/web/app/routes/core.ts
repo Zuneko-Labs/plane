@@ -110,6 +110,11 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/team-calendar", "./(all)/[workspaceSlug]/(projects)/team-calendar/page.tsx"),
         ]),
 
+        // Compliance
+        layout("./(all)/[workspaceSlug]/(projects)/compliance/layout.tsx", [
+          route(":workspaceSlug/compliance", "./(all)/[workspaceSlug]/(projects)/compliance/page.tsx"),
+        ]),
+
         // Workspace Views
         layout("./(all)/[workspaceSlug]/(projects)/workspace-views/layout.tsx", [
           route(":workspaceSlug/workspace-views", "./(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx"),

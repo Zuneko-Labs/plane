@@ -21,27 +21,6 @@ from plane.utils.exception_logger import log_exception
 from plane.utils.recurrence import add_interval, next_month_day
 
 
-def _get_or_create_recurring_state(project, created_by_id):
-    """Return the project's "Recurring" state, creating it if absent.
-
-    Generated occurrences are always placed in this state (regardless of the
-    source item's state) so they're easy to spot on the board.
-    """
-    from plane.db.models import State
-    from plane.db.models.state import StateGroup
-
-    state = State.all_state_objects.filter(project=project, name__iexact="Recurring").first()
-    if state:
-        return state
-    try:
-        state = State(project=project, name="Recurring", color="#6E56CF", group=StateGroup.UNSTARTED.value)
-        state.save(created_by_id=created_by_id)
-        return state
-    except IntegrityError:
-        # Lost a race with a concurrent create — re-fetch.
-        return State.all_state_objects.filter(project=project, name__iexact="Recurring").first()
-
-
 def _occurrence_dates(source, anchor):
     """Compute a new occurrence's (start, target) from the live source issue.
 
@@ -73,17 +52,17 @@ def _create_occurrence(recurrence, anchor):
 
     start_date, target_date = _occurrence_dates(source, anchor)
 
-    # Generated occurrences always go into the project's "Recurring" state
-    # (created on demand), regardless of the source item's state.
-    recurring_state = _get_or_create_recurring_state(recurrence.project, created_by_id)
-
     issue = Issue(
         project_id=project_id,
         name=source.name,
         description_html=source.description_html,
         description_json=source.description_json,
         priority=source.priority,
-        state_id=recurring_state.id if recurring_state else source.state_id,
+        # State is left unset — Issue.save() auto-assigns the project's
+        # default state (Todo) whenever state is None (see
+        # Issue._ensure_default_state). Occurrences land in Todo like any
+        # other work item, matching what the client asked for instead of a
+        # dedicated "Recurring" state.
         parent_id=source.parent_id,
         estimate_point_id=source.estimate_point_id,
         type_id=source.type_id,

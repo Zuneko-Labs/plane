@@ -9,7 +9,7 @@ Covers the pure date helpers (interval stepping, semi-monthly day derivation,
 month-length clamping) and the ``generate_recurring_issues`` task — in
 particular that EVERY active, due recurrence is recreated (not just one), that
 inactive/future ones are skipped, that occurrences are linked back to their
-recurrence, and that they land in the project's "Recurring" state.
+recurrence, and that they land in the project's default (Todo) state.
 """
 
 from datetime import date, timedelta
@@ -19,9 +19,24 @@ from freezegun import freeze_time
 from django.utils import timezone
 
 from plane.bgtasks.recurring_issue_task import generate_recurring_issues
-from plane.db.models import Issue, IssueRecurrence
+from plane.db.models import Issue, IssueRecurrence, State
+from plane.db.models.state import StateGroup
 from plane.tests.factories import ProjectFactory
 from plane.utils.recurrence import add_interval, derive_days_of_month, next_month_day
+
+
+def _make_todo_state(project):
+    """Create the project's default (Todo) state, mirroring what a project
+    creation flow normally seeds — bare ProjectFactory projects have none."""
+    return State.objects.create(
+        project=project,
+        workspace_id=project.workspace_id,
+        name="Todo",
+        color="#565EAD",
+        group=StateGroup.UNSTARTED.value,
+        default=True,
+        created_by_id=project.created_by_id,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -104,16 +119,16 @@ class TestGenerateRecurringIssues:
         assert r3.occurrences.count() == 1
         assert paused.occurrences.count() == 0
 
-    def test_occurrence_lands_in_recurring_state(self):
+    def test_occurrence_lands_in_default_todo_state(self):
         project = ProjectFactory()
+        todo_state = _make_todo_state(project)
         r = _make_recurrence(project, "task")
 
         generate_recurring_issues()
 
         occ = r.occurrences.first()
         assert occ is not None
-        assert occ.state is not None
-        assert occ.state.name == "Recurring"
+        assert occ.state_id == todo_state.id
 
     def test_occurrence_is_linked_to_recurrence(self):
         project = ProjectFactory()

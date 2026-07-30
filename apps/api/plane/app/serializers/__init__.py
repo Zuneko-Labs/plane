@@ -129,6 +129,8 @@ from .exporter import ExporterHistorySerializer
 
 from .webhook import WebhookSerializer, WebhookLogSerializer
 
+from .compliance import ComplianceCategorySerializer, ComplianceTemplateSerializer
+
 from .favorite import UserFavoriteSerializer
 
 from .draft import (
