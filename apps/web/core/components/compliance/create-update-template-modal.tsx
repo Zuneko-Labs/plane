@@ -20,7 +20,7 @@ import { useCompliance } from "@/hooks/store/use-compliance";
 // components
 import { COMPLIANCE_CADENCE_LABELS } from "./constants";
 
-const CADENCE_OPTIONS: TComplianceCadence[] = ["monthly", "quarterly", "annual", "advance_tax"];
+const CADENCE_OPTIONS: TComplianceCadence[] = ["monthly", "quarterly", "annual"];
 // Sentinel value for the "+ Create new category" option in the category
 // dropdown — resolved into a real category id at submit time.
 const NEW_CATEGORY_VALUE = "__new__";
@@ -122,7 +122,7 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
     let categoryId = data.category;
     if (isCreatingNewCategory) {
       if (!newCategoryName.trim()) {
-        setError("category", { type: "manual", message: "Enter a name for the new category." });
+        setError("category", { type: "manual", message: "Enter a name for the new label." });
         return;
       }
       try {
@@ -133,7 +133,7 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
         setToast({
           type: TOAST_TYPE.ERROR,
           title: "Error!",
-          message: err?.name?.[0] ?? err?.error ?? "Could not create category.",
+          message: err?.name?.[0] ?? err?.error ?? "Could not create label.",
         });
         return;
       }
@@ -210,18 +210,18 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
             </div>
 
             <div className="space-y-1">
-              <FieldLabel>Category</FieldLabel>
+              <FieldLabel>Label</FieldLabel>
               <Controller
                 control={control}
                 name="category"
-                rules={{ required: "Select or create a category." }}
+                rules={{ required: "Select or create a label." }}
                 render={({ field: { value, onChange } }) =>
                   isCreatingNewCategory ? (
                     <div className="flex items-center gap-2">
                       <Input
                         value={newCategoryName}
                         onChange={(e) => setNewCategoryName(e.target.value)}
-                        placeholder="New category name, e.g. GST"
+                        placeholder="New label name, e.g. GST"
                         className="w-full"
                       />
                       <button
@@ -239,7 +239,7 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
                     <CustomSelect
                       value={value}
                       onChange={onChange}
-                      label={categories.find((c) => c.id === value)?.name ?? "Select category"}
+                      label={categories.find((c) => c.id === value)?.name ?? "Select label"}
                       buttonClassName="w-full border-[0.5px] border-strong"
                     >
                       {categories.map((cat) => (
@@ -247,7 +247,7 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
                           {cat.name}
                         </CustomSelect.Option>
                       ))}
-                      <CustomSelect.Option value={NEW_CATEGORY_VALUE}>+ Create new category</CustomSelect.Option>
+                      <CustomSelect.Option value={NEW_CATEGORY_VALUE}>+ Create new label</CustomSelect.Option>
                     </CustomSelect>
                   )
                 }
