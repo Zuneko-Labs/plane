@@ -71,11 +71,13 @@ export class ComplianceStore implements IComplianceStore {
   }
 
   get categories() {
-    return Object.values(this.categoryMap).toSorted((a, b) => a.name.localeCompare(b.name));
+    // eslint-disable-next-line unicorn/no-array-sort -- `Object.values()` above always returns a fresh array, so sorting it in place is safe (no shared/mutated state); `toSorted()` isn't available in this project's configured TS lib target
+    return Object.values(this.categoryMap).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   get templates() {
-    return Object.values(this.templateMap).toSorted((a, b) => a.title.localeCompare(b.title));
+    // eslint-disable-next-line unicorn/no-array-sort -- `Object.values()` above always returns a fresh array, so sorting it in place is safe (no shared/mutated state); `toSorted()` isn't available in this project's configured TS lib target
+    return Object.values(this.templateMap).sort((a, b) => a.title.localeCompare(b.title));
   }
 
   fetchCategoriesAndTemplates = async (workspaceSlug: string) => {

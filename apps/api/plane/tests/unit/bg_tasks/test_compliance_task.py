@@ -7,11 +7,13 @@ Unit tests for the compliance calendar engine and ``generate_compliance_issues``
 
 Covers the pure cadence math (monthly reports the previous month; quarterly
 only fires in the month after a quarter closes; annual fires only in its due
-month; advance_tax fires in Jun/Sep/Dec/Mar) and the task itself — in
-particular that running it twice for the same date never creates a
-duplicate Issue (the whole point of claiming the ``ComplianceRun`` row
-before creating anything), that inactive templates and archived/non-applicable
-projects are skipped, and that the category Label is attached.
+month; advance_tax fires in Jun/Sep/Dec/Mar — and, on top of the month
+gating, every cadence only actually fires on its exact due_day, not any other
+day within an eligible month/period) and the task itself — in particular
+that running it twice for the same date never creates a duplicate Issue
+(the whole point of claiming the ``ComplianceRun`` row before creating
+anything), that inactive templates and archived/non-applicable projects are
+skipped, and that the category Label is attached.
 """
 
 from datetime import date
@@ -64,38 +66,47 @@ class _Template:
 
 @pytest.mark.unit
 class TestGenerateDueTask:
-    def test_monthly_reports_previous_month(self):
-        gen = generate_due_task(_Template("monthly", due_day=20), date(2026, 8, 15))
+    def test_monthly_fires_exactly_on_due_day(self):
+        template = _Template("monthly", due_day=20)
+        assert generate_due_task(template, date(2026, 8, 15)) is None
+        assert generate_due_task(template, date(2026, 8, 21)) is None
+        gen = generate_due_task(template, date(2026, 8, 20))
         assert gen.period_label == "July 2026"
-        assert gen.target_date == date(2026, 8, 20)
+        assert gen.due_date == date(2026, 8, 20)
         assert gen.title == "GSTR-3B - July 2026"
 
     def test_monthly_due_day_clamps_to_month_end(self):
-        gen = generate_due_task(_Template("monthly", due_day=31), date(2026, 2, 10))
-        assert gen.target_date == date(2026, 2, 28)
+        template = _Template("monthly", due_day=31)
+        assert generate_due_task(template, date(2026, 2, 10)) is None
+        gen = generate_due_task(template, date(2026, 2, 28))
+        assert gen.due_date == date(2026, 2, 28)
 
-    def test_quarterly_only_fires_in_closing_months(self):
-        assert generate_due_task(_Template("quarterly"), date(2026, 5, 1)) is None
-        gen = generate_due_task(_Template("quarterly", due_day=31), date(2026, 7, 5))
+    def test_quarterly_only_fires_on_due_day_in_closing_months(self):
+        template = _Template("quarterly", due_day=31)
+        assert generate_due_task(template, date(2026, 5, 31)) is None  # wrong month
+        assert generate_due_task(template, date(2026, 7, 5)) is None  # right month, wrong day
+        gen = generate_due_task(template, date(2026, 7, 31))
         assert gen.period_label == "Q1 2026"
-        assert gen.target_date == date(2026, 7, 31)
+        assert gen.due_date == date(2026, 7, 31)
 
-    def test_annual_only_fires_in_due_month(self):
+    def test_annual_only_fires_on_due_day_in_due_month(self):
         template = _Template("annual", due_day=30, due_month=10)
-        assert generate_due_task(template, date(2026, 9, 1)) is None
-        gen = generate_due_task(template, date(2026, 10, 1))
+        assert generate_due_task(template, date(2026, 9, 30)) is None  # wrong month
+        assert generate_due_task(template, date(2026, 10, 1)) is None  # right month, wrong day
+        gen = generate_due_task(template, date(2026, 10, 30))
         assert gen.period_label == "FY 2025-26"
-        assert gen.target_date == date(2026, 10, 30)
+        assert gen.due_date == date(2026, 10, 30)
 
-    def test_advance_tax_only_fires_in_scheduled_months(self):
+    def test_advance_tax_only_fires_on_due_day_in_scheduled_months(self):
         template = _Template("advance_tax", due_day=15)
-        assert generate_due_task(template, date(2026, 7, 1)) is None
-        gen = generate_due_task(template, date(2026, 6, 1))
+        assert generate_due_task(template, date(2026, 7, 15)) is None  # wrong month
+        assert generate_due_task(template, date(2026, 6, 1)) is None  # right month, wrong day
+        gen = generate_due_task(template, date(2026, 6, 15))
         assert gen.period_label == "June 2026"
-        assert gen.target_date == date(2026, 6, 15)
+        assert gen.due_date == date(2026, 6, 15)
 
     def test_malformed_name_template_falls_back(self):
-        gen = generate_due_task(_Template("monthly", name_template="{tittle} - {period}"), date(2026, 8, 15))
+        gen = generate_due_task(_Template("monthly", name_template="{tittle} - {period}"), date(2026, 8, 20))
         assert gen.title == "GSTR-3B - July 2026"
 
 
@@ -143,7 +154,10 @@ class TestGenerateComplianceIssues:
         assert summary["created"] == 1
         issue = Issue.objects.get(project=project)
         assert issue.name == "GST Return - July 2026"
-        assert issue.target_date == date(2026, 8, 20)
+        # The due date is assigned as start_date (task is only ever created
+        # exactly on its due date), not target_date.
+        assert issue.start_date == date(2026, 8, 20)
+        assert issue.target_date is None
         # Lands in the project's default (Todo) state, not a dedicated
         # "Compliance" state — the client asked for generated items to
         # behave like any other work item.
