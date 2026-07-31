@@ -42,10 +42,19 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
 
   const showLabel = preferences.displayMode === "icon_with_label";
 
+  // TopNavigationRoot stays mounted across client-side navigation (it's part
+  // of the persistent layout), so both fetches below only ran once at initial
+  // load with no polling — a notification arriving later never showed up in
+  // the badge or the hover preview until the user happened to navigate to the
+  // dedicated Notifications page (which has its own fetch) and back.
+  // refreshInterval polls both so new notifications surface without that.
+  const NOTIFICATION_POLL_INTERVAL_MS = 30000;
+
   // Fetch notification count
   useSWR(
     workspaceSlug ? "WORKSPACE_UNREAD_NOTIFICATION_COUNT" : null,
-    workspaceSlug ? () => getUnreadNotificationsCount(workspaceSlug.toString()) : null
+    workspaceSlug ? () => getUnreadNotificationsCount(workspaceSlug.toString()) : null,
+    { refreshInterval: NOTIFICATION_POLL_INTERVAL_MS }
   );
 
   // Fetch the notification list itself (not just the unread count) so the hover preview has
@@ -58,6 +67,7 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
       revalidateIfStale: true,
       revalidateOnFocus: false,
       revalidateOnReconnect: true,
+      refreshInterval: NOTIFICATION_POLL_INTERVAL_MS,
     }
   );
 

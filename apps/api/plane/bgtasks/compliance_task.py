@@ -54,7 +54,11 @@ def _create_compliance_issue(template, project, generated, created_by_id):
         project_id=project.id,
         name=generated.title,
         priority=template.priority,
-        target_date=generated.target_date,
+        # The due date is assigned as start_date, not target_date — the
+        # task is only ever created exactly on its due date (see the
+        # day-gate in generate_due_task), so there's no separate deadline
+        # still ahead to track.
+        start_date=generated.due_date,
     )
     issue.save(created_by_id=created_by_id)
 
@@ -112,7 +116,7 @@ def generate_compliance_issues(as_of=None, workspace_slug=None):
                             project=project,
                             template=template,
                             period_label=generated.period_label,
-                            target_date=generated.target_date,
+                            target_date=generated.due_date,
                             issue=None,
                         )
                 except IntegrityError:

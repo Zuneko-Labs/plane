@@ -36,7 +36,7 @@ type TFormValues = {
   title: string;
   category: string;
   cadence: TComplianceCadence;
-  due_day: number;
+  due_day: number | null;
   due_month: number | null;
   name_template: string;
   priority: TComplianceTemplate["priority"];
@@ -111,6 +111,13 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
 
   const handleFormSubmit = async (data: TFormValues) => {
     if (!workspaceSlug) return;
+    // The "required" rule already blocks this in practice — guarding here
+    // too since the field is nullable (so it can be fully cleared while
+    // typing, rather than snapping to 0).
+    if (data.due_day === null) {
+      setError("due_day", { type: "manual", message: "Due day is required." });
+      return;
+    }
 
     let categoryId = data.category;
     if (isCreatingNewCategory) {
@@ -135,6 +142,7 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
     const payload: Partial<TComplianceTemplate> = {
       ...data,
       category: categoryId,
+      due_day: data.due_day,
       due_month: data.cadence === "annual" ? data.due_month : null,
     };
 
@@ -207,34 +215,43 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
                 control={control}
                 name="category"
                 rules={{ required: "Select or create a category." }}
-                render={({ field: { value, onChange } }) => (
-                  <CustomSelect
-                    value={value}
-                    onChange={onChange}
-                    label={
-                      value === NEW_CATEGORY_VALUE
-                        ? "+ New category"
-                        : (categories.find((c) => c.id === value)?.name ?? "Select category")
-                    }
-                    buttonClassName="w-full border-[0.5px] border-strong"
-                  >
-                    {categories.map((cat) => (
-                      <CustomSelect.Option key={cat.id} value={cat.id}>
-                        {cat.name}
-                      </CustomSelect.Option>
-                    ))}
-                    <CustomSelect.Option value={NEW_CATEGORY_VALUE}>+ Create new category</CustomSelect.Option>
-                  </CustomSelect>
-                )}
+                render={({ field: { value, onChange } }) =>
+                  isCreatingNewCategory ? (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={newCategoryName}
+                        onChange={(e) => setNewCategoryName(e.target.value)}
+                        placeholder="New category name, e.g. GST"
+                        className="w-full"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewCategoryName("");
+                          onChange("");
+                        }}
+                        className="text-13 whitespace-nowrap text-tertiary hover:text-primary"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <CustomSelect
+                      value={value}
+                      onChange={onChange}
+                      label={categories.find((c) => c.id === value)?.name ?? "Select category"}
+                      buttonClassName="w-full border-[0.5px] border-strong"
+                    >
+                      {categories.map((cat) => (
+                        <CustomSelect.Option key={cat.id} value={cat.id}>
+                          {cat.name}
+                        </CustomSelect.Option>
+                      ))}
+                      <CustomSelect.Option value={NEW_CATEGORY_VALUE}>+ Create new category</CustomSelect.Option>
+                    </CustomSelect>
+                  )
+                }
               />
-              {isCreatingNewCategory && (
-                <Input
-                  value={newCategoryName}
-                  onChange={(e) => setNewCategoryName(e.target.value)}
-                  placeholder="New category name, e.g. GST"
-                  className="mt-1 w-full"
-                />
-              )}
               {errors.category && <p className="text-11 text-danger-primary">{errors.category.message}</p>}
             </div>
           </div>
@@ -295,8 +312,8 @@ export const CreateUpdateTemplateModal = observer(function CreateUpdateTemplateM
                 render={({ field: { value, onChange } }) => (
                   <Input
                     type="number"
-                    value={value}
-                    onChange={(e) => onChange(Number(e.target.value))}
+                    value={value ?? ""}
+                    onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}
                     hasError={Boolean(errors.due_day)}
                     placeholder="20"
                     className="w-full"
