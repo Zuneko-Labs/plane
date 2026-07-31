@@ -4,13 +4,6 @@ packages:
   - "!apps/api"
   - "!apps/proxy"
 
-# Under `turbo run dev`/`build` each package invokes pnpm, whose pre-run deps
-# check decides node_modules is stale and tries to purge+reinstall it. With no
-# TTY (running under turbo) the purge prompt aborts the task
-# (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY). Disable the check and the prompt.
-# (pnpm 11 reads these settings from here, not .npmrc.)
-verifyDepsBeforeRun: false
-confirmModulesPurge: false
 
 catalog:
   "@atlaskit/pragmatic-drag-and-drop": "1.7.4"
