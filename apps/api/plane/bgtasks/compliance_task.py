@@ -54,11 +54,7 @@ def _create_compliance_issue(template, project, generated, created_by_id):
         project_id=project.id,
         name=generated.title,
         priority=template.priority,
-        # The due date is assigned as start_date, not target_date — the
-        # task is only ever created exactly on its due date (see the
-        # day-gate in generate_due_task), so there's no separate deadline
-        # still ahead to track.
-        start_date=generated.due_date,
+        target_date=generated.target_date,
     )
     issue.save(created_by_id=created_by_id)
 
@@ -110,22 +106,22 @@ def generate_compliance_issues(as_of=None, workspace_slug=None):
 
         for project in template.applicable_projects.filter(archived_at__isnull=True):
             try:
-                try:
-                    with transaction.atomic():
-                        run = ComplianceRun.objects.create(
-                            project=project,
-                            template=template,
-                            period_label=generated.period_label,
-                            target_date=generated.due_date,
-                            issue=None,
-                        )
-                except IntegrityError:
-                    # Another worker already claimed this (project, template,
-                    # period) — confined to its own savepoint, so this loop
-                    # can keep going even inside an outer transaction.
-                    skipped.append({"project": project.name, "title": generated.title})
-                    continue
+                with transaction.atomic():
+                    run = ComplianceRun.objects.create(
+                        project=project,
+                        template=template,
+                        period_label=generated.period_label,
+                        target_date=generated.target_date,
+                        issue=None,
+                    )
+            except IntegrityError:
+                # Another worker already claimed this (project, template,
+                # period) — confined to its own savepoint, so this loop
+                # can keep going even inside an outer transaction.
+                skipped.append({"project": project.name, "title": generated.title})
+                continue
 
+            try:
                 issue = _create_compliance_issue(template, project, generated, template.created_by_id)
                 run.issue = issue
                 run.save(update_fields=["issue", "updated_at"])
@@ -144,6 +140,11 @@ def generate_compliance_issues(as_of=None, workspace_slug=None):
                 created.append({"project": project.name, "title": generated.title, "issue_id": str(issue.id)})
             except Exception as e:
                 log_exception(e)
+                # Issue creation failed after the run already claimed this
+                # (project, template, period) slot — free it so the next
+                # "Generate now"/beat tick can retry instead of skipping
+                # forever with an orphaned, issue-less run.
+                run.delete()
                 failed.append({"project": project.name, "title": generated.title, "reason": str(e)})
                 continue
 

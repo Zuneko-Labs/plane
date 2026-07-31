@@ -77,21 +77,13 @@ def format_task_name(name_template: str, title: str, period_label: str) -> str:
 @dataclass(frozen=True)
 class GeneratedTask:
     period_label: str
-    # The statutory due date computed from the template's due_day/due_month.
-    # Assigned as the generated Issue's *start_date*, not its target_date —
-    # the task is only created on this date (see the day-gate below), so
-    # there is no separate "deadline still ahead" to track via target_date.
-    due_date: date
+    target_date: date
     title: str
 
 
 def generate_due_task(template, as_of: date) -> Optional[GeneratedTask]:
     """Compute the due task for a single ``ComplianceTemplate`` on ``as_of``,
-    or ``None`` if this cadence isn't due to fire on this exact date.
-
-    The task is created on its due date, not at the start of the period —
-    each cadence branch below only establishes which month(s) are eligible;
-    the final day-gate is what actually restricts firing to due_day itself.
+    or ``None`` if this cadence doesn't fire this month.
     """
     cadence = template.cadence
 
@@ -112,9 +104,6 @@ def generate_due_task(template, as_of: date) -> Optional[GeneratedTask]:
     else:
         return None
 
-    due_date = date(as_of.year, as_of.month, _clamp_day(as_of.year, as_of.month, template.due_day))
-    if as_of != due_date:
-        return None
-
+    target_date = date(as_of.year, as_of.month, _clamp_day(as_of.year, as_of.month, template.due_day))
     title = format_task_name(template.name_template, template.title, period_label)
-    return GeneratedTask(period_label=period_label, due_date=due_date, title=title)
+    return GeneratedTask(period_label=period_label, target_date=target_date, title=title)
