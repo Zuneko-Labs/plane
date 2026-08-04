@@ -216,8 +216,8 @@ const errorCodeMessages: {
     message: () => `Email and password required. Please try again.`,
   },
   [EAuthenticationErrorCodes.AUTHENTICATION_FAILED_SIGN_IN]: {
-    title: `Authentication failed`,
-    message: () => `Authentication failed. Please try again.`,
+    title: `Incorrect password`,
+    message: () => `Incorrect password. Please try again.`,
   },
   [EAuthenticationErrorCodes.INVALID_EMAIL_SIGN_IN]: {
     title: `Invalid email`,
