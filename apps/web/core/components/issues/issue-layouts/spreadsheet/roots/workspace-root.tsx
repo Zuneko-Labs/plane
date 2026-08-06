@@ -14,6 +14,7 @@ import { EIssuesStoreType, EIssueLayoutTypes } from "@plane/types";
 import { AllIssueQuickActions } from "@/components/issues/issue-layouts/quick-action-dropdowns";
 import { SpreadsheetLayoutLoader } from "@/components/ui/loader/layouts/spreadsheet-layout-loader";
 // hooks
+import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useIssuesActions } from "@/hooks/use-issues-actions";
@@ -38,7 +39,7 @@ type Props = {
 };
 
 export const WorkspaceSpreadsheetRoot = observer(function WorkspaceSpreadsheetRoot(props: Props) {
-  const { isLoading = false, workspaceSlug, globalViewId, fetchNextPages, issuesLoading } = props;
+  const { isLoading = false, workspaceSlug, globalViewId, routeFilters, fetchNextPages, issuesLoading } = props;
 
   // Custom hooks
   useWorkspaceIssueProperties(workspaceSlug);
@@ -50,6 +51,9 @@ export const WorkspaceSpreadsheetRoot = observer(function WorkspaceSpreadsheetRo
   } = useIssues(EIssuesStoreType.GLOBAL);
   const { updateIssue, removeIssue, archiveIssue } = useIssuesActions(EIssuesStoreType.GLOBAL);
   const { allowPermissions } = useUserPermissions();
+  const {
+    issue: { getIssueById },
+  } = useIssueDetail();
 
   // Derived values
   const issueFilters = globalViewId ? filters?.[globalViewId.toString()] : undefined;
@@ -108,7 +112,13 @@ export const WorkspaceSpreadsheetRoot = observer(function WorkspaceSpreadsheetRo
   }
 
   // Computed values
-  const issueIds = groupedIssueIds[ALL_ISSUES];
+  const allIssueIds = groupedIssueIds[ALL_ISSUES];
+  const nameSearchQuery = routeFilters?.name?.trim().toLowerCase();
+  const issueIds = (() => {
+    const ids = Array.isArray(allIssueIds) ? allIssueIds : [];
+    if (!nameSearchQuery) return ids;
+    return ids.filter((id) => getIssueById(id)?.name?.toLowerCase().includes(nameSearchQuery));
+  })();
   const nextPageResults = getPaginationData(ALL_ISSUES, undefined)?.nextPageResults;
 
   // Render spreadsheet

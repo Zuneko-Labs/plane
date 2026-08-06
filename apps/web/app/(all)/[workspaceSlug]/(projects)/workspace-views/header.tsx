@@ -6,7 +6,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { observer } from "mobx-react";
-import { useParams } from "next/navigation";
+import { usePathname, useParams, useSearchParams } from "next/navigation";
 // plane imports
 import {
   ALL_ISSUES,
@@ -23,14 +23,17 @@ import { EIssuesStoreType, EIssueLayoutTypes } from "@plane/types";
 import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@plane/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
+import { CountChip } from "@/components/common/count-chip";
 import { SwitcherLabel } from "@/components/common/switcher-label";
 import { DisplayFiltersSelection, FiltersDropdown } from "@/components/issues/issue-layouts/filters";
+import { WorkItemNameSearchInput } from "@/components/work-item-filters/name-search-input";
 import { WorkItemFiltersToggle } from "@/components/work-item-filters/filters-toggle";
 import { DefaultWorkspaceViewQuickActions } from "@/components/workspace/views/default-view-quick-action";
 import { CreateUpdateWorkspaceViewModal } from "@/components/workspace/views/modal";
 import { WorkspaceViewQuickActions } from "@/components/workspace/views/quick-action";
 // hooks
 import { useGlobalView } from "@/hooks/store/use-global-view";
+import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useAppRouter } from "@/hooks/use-app-router";
 import { GlobalViewLayoutSelection } from "@/plane-web/components/views/helper";
@@ -40,6 +43,8 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   const [createViewModal, setCreateViewModal] = useState(false);
   // router
   const router = useAppRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { workspaceSlug, globalViewId: routerGlobalViewId } = useParams();
   const globalViewId = routerGlobalViewId ? routerGlobalViewId.toString() : undefined;
   // store hooks
@@ -48,6 +53,9 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
     issues: { groupedIssueIds },
   } = useIssues(EIssuesStoreType.GLOBAL);
   const { getViewDetailsById, currentWorkspaceViews } = useGlobalView();
+  const {
+    issue: { getIssueById },
+  } = useIssueDetail();
   const { t } = useTranslation();
 
   const issueFilters = globalViewId ? filters[globalViewId.toString()] : undefined;
@@ -77,6 +85,19 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
     [workspaceSlug, updateFilters, globalViewId]
   );
 
+  const workItemNameSearchQuery = searchParams.get("name") ?? "";
+
+  const handleWorkItemNameSearch = useCallback(
+    (value: string) => {
+      const updatedParams = new URLSearchParams(searchParams.toString());
+      if (value.trim() !== "") updatedParams.set("name", value);
+      else updatedParams.delete("name");
+      const queryString = updatedParams.toString();
+      router.replace(`${pathname}${queryString ? `?${queryString}` : ""}`);
+    },
+    [pathname, router, searchParams]
+  );
+
   const handleLayoutChange = useCallback(
     (layout: EIssueLayoutTypes) => {
       if (!workspaceSlug || !globalViewId) return;
@@ -92,7 +113,13 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   );
 
   const totalIssuesCount = groupedIssueIds?.[ALL_ISSUES];
-  const totalIssuesCountNumber = Array.isArray(totalIssuesCount) ? totalIssuesCount.length : undefined;
+  const normalizedNameSearchQuery = searchParams.get("name")?.trim().toLowerCase();
+  const totalIssuesCountNumber = Array.isArray(totalIssuesCount)
+    ? normalizedNameSearchQuery
+      ? totalIssuesCount.filter((id) => getIssueById(id)?.name?.toLowerCase().includes(normalizedNameSearchQuery))
+          .length
+      : totalIssuesCount.length
+    : undefined;
 
   const isLocked = viewDetails?.is_locked;
 
@@ -101,8 +128,6 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   const defaultViewDetails = DEFAULT_GLOBAL_VIEWS_LIST.find((view) => view.key === globalViewId);
 
   const breadcrumbTitle = viewDetails?.name ?? t(defaultViewDetails?.i18n_label ?? "");
-  const breadcrumbTitleWithCount =
-    totalIssuesCountNumber !== undefined ? `${breadcrumbTitle}  ${totalIssuesCountNumber}` : breadcrumbTitle;
 
   const defaultOptions = DEFAULT_GLOBAL_VIEWS_LIST.map((view) => ({
     value: view.key,
@@ -133,30 +158,35 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
       <CreateUpdateWorkspaceViewModal isOpen={createViewModal} onClose={() => setCreateViewModal(false)} />
       <Header>
         <Header.LeftItem>
-          <Breadcrumbs>
-            <Breadcrumbs.Item
-              component={<BreadcrumbLink label={t("views")} icon={<ViewsIcon className="h-4 w-4 text-tertiary" />} />}
-            />
-            <Breadcrumbs.Item
-              component={
-                <BreadcrumbNavigationSearchDropdown
-                  selectedItem={globalViewId?.toString() || ""}
-                  navigationItems={switcherOptions}
-                  onChange={(value: string) => {
-                    router.push(`/${workspaceSlug}/workspace-views/${value}`);
-                  }}
-                  title={breadcrumbTitleWithCount}
-                  icon={
-                    <Breadcrumbs.Icon>
-                      <ViewsIcon className="size-4 flex-shrink-0 text-tertiary" />
-                    </Breadcrumbs.Icon>
-                  }
-                  isLast
-                />
-              }
-              isLast
-            />
-          </Breadcrumbs>
+          <div className="flex items-center gap-2.5">
+            <Breadcrumbs className="flex-grow-0">
+              <Breadcrumbs.Item
+                component={<BreadcrumbLink label={t("views")} icon={<ViewsIcon className="h-4 w-4 text-tertiary" />} />}
+              />
+              <Breadcrumbs.Item
+                component={
+                  <BreadcrumbNavigationSearchDropdown
+                    selectedItem={globalViewId?.toString() || ""}
+                    navigationItems={switcherOptions}
+                    onChange={(value: string) => {
+                      router.push(`/${workspaceSlug}/workspace-views/${value}`);
+                    }}
+                    title={breadcrumbTitle}
+                    icon={
+                      <Breadcrumbs.Icon>
+                        <ViewsIcon className="size-4 flex-shrink-0 text-tertiary" />
+                      </Breadcrumbs.Icon>
+                    }
+                    isLast
+                  />
+                }
+                isLast
+              />
+            </Breadcrumbs>
+            {totalIssuesCountNumber !== undefined && totalIssuesCountNumber > 0 ? (
+              <CountChip count={totalIssuesCountNumber} />
+            ) : null}
+          </div>
         </Header.LeftItem>
 
         <Header.RightItem className="items-center">
@@ -167,6 +197,11 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
               workspaceSlug={workspaceSlug.toString()}
             />
           )}
+          <WorkItemNameSearchInput
+            searchQuery={workItemNameSearchQuery}
+            updateSearchQuery={handleWorkItemNameSearch}
+            placeholder="Search work items"
+          />
           {globalViewId && <WorkItemFiltersToggle entityType={EIssuesStoreType.GLOBAL} entityId={globalViewId} />}
           {!isLocked && (
             <FiltersDropdown title={t("common.display")} placement="bottom-end">

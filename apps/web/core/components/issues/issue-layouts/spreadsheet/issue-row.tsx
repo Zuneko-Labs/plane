@@ -298,8 +298,9 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
               }
             )}
           >
-            {/* Identifier section - conditionally rendered */}
-            {displayProperties?.key && (
+            {/* Identifier section - conditionally rendered (redundant at workspace level, where the
+                Project column already identifies the project) */}
+            {displayProperties?.key && !isWorkspaceLevel && (
               <div className="flex h-full min-w-24 flex-shrink-0 items-center">
                 <div className="relative flex cursor-pointer items-center text-11 hover:text-primary">
                   {issueDetail.project_id && (
@@ -318,8 +319,8 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
             {/* Workitem section */}
             <div
               className={cn("flex flex-grow items-center gap-0.5 py-2", {
-                "min-w-[360px]": !displayProperties?.key,
-                "min-w-60": displayProperties?.key,
+                "min-w-[360px]": !displayProperties?.key || isWorkspaceLevel,
+                "min-w-60": displayProperties?.key && !isWorkspaceLevel,
               })}
             >
               {/* select checkbox */}
