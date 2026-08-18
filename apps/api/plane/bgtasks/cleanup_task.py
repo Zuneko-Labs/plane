@@ -19,6 +19,7 @@ from celery import shared_task
 # Module imports
 from plane.db.models import (
     EmailNotificationLog,
+    EventLog,
     PageVersion,
     APIActivityLog,
     IssueDescriptionVersion,
@@ -205,4 +206,42 @@ def delete_webhook_logs():
         queryset_func=get_webhook_logs_queryset,
         model=WebhookLog,
         task_name="Webhook Log",
+    )
+
+
+def get_event_log_queryset():
+    """Get outbox events past the event log retention window.
+
+    Filters on `occurred_at`, not `created_at` — `occurred_at` is the wall
+    clock the sync architecture treats as canonical for this table (see
+    db/models/event_log.py), and is what the `event_log_occurred_idx` index
+    is built for.
+
+    Excludes rows still pending dispatch (`dispatched_at IS NULL`) — sweeping
+    those would permanently lose a webhook/sync event that was never
+    delivered (e.g. broker down longer than the retention window), instead of
+    just running late.
+    """
+    cutoff_time = timezone.now() - timedelta(days=settings.EVENT_LOG_RETENTION_DAYS)
+    logger.info(f"Event log cutoff time: {cutoff_time}")
+
+    stuck = EventLog.all_objects.filter(occurred_at__lte=cutoff_time, dispatched_at__isnull=True).count()
+    if stuck:
+        logger.warning(f"{stuck} event_log rows past retention are still undispatched — skipping their deletion")
+
+    return (
+        EventLog.all_objects.filter(occurred_at__lte=cutoff_time, dispatched_at__isnull=False)
+        .order_by("occurred_at")
+        .values_list("id", flat=True)
+        .iterator(chunk_size=BATCH_SIZE)
+    )
+
+
+@shared_task
+def delete_event_logs():
+    """Delete old outbox events past the retention window."""
+    process_cleanup_task(
+        queryset_func=get_event_log_queryset,
+        model=EventLog,
+        task_name="Event Log",
     )

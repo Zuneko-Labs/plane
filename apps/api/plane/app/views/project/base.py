@@ -8,6 +8,7 @@ import json
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import Exists, F, OuterRef, Prefetch, Q, Subquery, Count
 from django.utils import timezone
 
@@ -23,6 +24,7 @@ from plane.app.serializers import (
     ProjectSerializer,
 )
 from plane.app.views.base import BaseAPIView, BaseViewSet
+from plane.bgtasks.event_outbox import dispatch_event, write_archive_event, write_delete_event, write_model_event
 from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.bgtasks.webhook_task import model_activity, webhook_activity
 from plane.db.models import (
@@ -260,52 +262,66 @@ class ProjectViewSet(BaseViewSet):
 
         serializer = ProjectSerializer(data={**request.data}, context={"workspace_id": workspace.id})
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
 
-            # Add the user as Administrator to the project
-            _ = ProjectMember.objects.create(
-                project_id=serializer.data["id"],
-                member=request.user,
-                role=ROLE.ADMIN.value,
-            )
-
-            if serializer.data["project_lead"] is not None and str(serializer.data["project_lead"]) != str(
-                request.user.id
-            ):
-                ProjectMember.objects.create(
+                # Add the user as Administrator to the project
+                _ = ProjectMember.objects.create(
                     project_id=serializer.data["id"],
-                    member_id=serializer.data["project_lead"],
+                    member=request.user,
                     role=ROLE.ADMIN.value,
                 )
 
-            State.objects.bulk_create(
-                [
-                    State(
-                        name=state["name"],
-                        color=state["color"],
-                        project=serializer.instance,
-                        sequence=state["sequence"],
-                        workspace=serializer.instance.workspace,
-                        group=state["group"],
-                        default=state.get("default", False),
-                        created_by=request.user,
+                if serializer.data["project_lead"] is not None and str(serializer.data["project_lead"]) != str(
+                    request.user.id
+                ):
+                    ProjectMember.objects.create(
+                        project_id=serializer.data["id"],
+                        member_id=serializer.data["project_lead"],
+                        role=ROLE.ADMIN.value,
                     )
-                    for state in DEFAULT_STATES
-                ]
-            )
 
-            project = self.get_queryset().filter(pk=serializer.data["id"]).first()
+                State.objects.bulk_create(
+                    [
+                        State(
+                            name=state["name"],
+                            color=state["color"],
+                            project=serializer.instance,
+                            sequence=state["sequence"],
+                            workspace=serializer.instance.workspace,
+                            group=state["group"],
+                            default=state.get("default", False),
+                            created_by=request.user,
+                        )
+                        for state in DEFAULT_STATES
+                    ]
+                )
 
-            # Create the model activity
-            model_activity.delay(
-                model_name="project",
-                model_id=str(project.id),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                project = self.get_queryset().filter(pk=serializer.data["id"]).first()
+
+                event = write_model_event(
+                    model_name="project",
+                    model_id=str(project.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=workspace.id,
+                )
+
+                # Create the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="project",
+                        model_id=str(project.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             serializer = ProjectListSerializer(project)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -354,27 +370,42 @@ class ProjectViewSet(BaseViewSet):
         )
 
         if serializer.is_valid():
-            serializer.save()
-            if intake_view:
-                intake = Intake.objects.filter(project=project, is_default=True).first()
-                if not intake:
-                    Intake.objects.create(
-                        name=f"{project.name} Intake",
-                        project=project,
-                        is_default=True,
+            with transaction.atomic():
+                serializer.save()
+                if intake_view:
+                    intake = Intake.objects.filter(project=project, is_default=True).first()
+                    if not intake:
+                        Intake.objects.create(
+                            name=f"{project.name} Intake",
+                            project=project,
+                            is_default=True,
+                        )
+
+                project = self.get_queryset().filter(pk=serializer.data["id"]).first()
+
+                event = write_model_event(
+                    model_name="project",
+                    model_id=str(project.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=workspace.id,
+                )
+
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="project",
+                        model_id=str(project.id),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
                     )
+                    dispatch_event.delay(event_log_id=str(event.id))
 
-            project = self.get_queryset().filter(pk=serializer.data["id"]).first()
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
-            model_activity.delay(
-                model_name="project",
-                model_id=str(project.id),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
             serializer = ProjectListSerializer(project)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -396,20 +427,35 @@ class ProjectViewSet(BaseViewSet):
             ).exists()
         ):
             project = Project.objects.get(pk=pk, workspace__slug=slug)
-            project.delete()
-            webhook_activity.delay(
-                event="project",
-                verb="deleted",
-                field=None,
-                old_value=None,
-                new_value=None,
-                actor_id=request.user.id,
-                slug=slug,
-                current_site=base_host(request=request, is_app=True),
-                event_id=project.id,
-                old_identifier=None,
-                new_identifier=None,
-            )
+            with transaction.atomic():
+                project_id = project.id
+                workspace_id = project.workspace_id
+                project.delete()
+
+                event = write_delete_event(
+                    model_name="project",
+                    entity_id=project_id,
+                    actor_id=request.user.id,
+                    workspace_id=workspace_id,
+                )
+
+                def _dispatch_webhook_activity():
+                    webhook_activity.delay(
+                        event="project",
+                        verb="deleted",
+                        field=None,
+                        old_value=None,
+                        new_value=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        current_site=base_host(request=request, is_app=True),
+                        event_id=project_id,
+                        old_identifier=None,
+                        new_identifier=None,
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_webhook_activity, robust=True)
             # Delete the project members
             DeployBoard.objects.filter(project_id=pk, workspace__slug=slug).delete()
 
@@ -428,16 +474,36 @@ class ProjectArchiveUnarchiveEndpoint(BaseAPIView):
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def post(self, request, slug, project_id):
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
-        project.archived_at = timezone.now()
-        project.save()
-        UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
+        with transaction.atomic():
+            project.archived_at = timezone.now()
+            project.save()
+            UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
+
+            event = write_archive_event(
+                model_name="project",
+                model_id=str(project.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=project.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response({"archived_at": str(project.archived_at)}, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def delete(self, request, slug, project_id):
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
-        project.archived_at = None
-        project.save()
+        with transaction.atomic():
+            project.archived_at = None
+            project.save()
+
+            event = write_archive_event(
+                model_name="project",
+                model_id=str(project.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=project.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -6,6 +6,7 @@
 import copy
 import json
 
+from django.db import transaction
 from django.db.models import F, Func, OuterRef, Q, Subquery
 
 # Django Imports
@@ -19,6 +20,7 @@ from rest_framework.response import Response
 
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import ModuleIssueSerializer
+from plane.bgtasks.event_outbox import dispatch_event, write_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
     Issue,
@@ -221,36 +223,61 @@ class ModuleIssueViewSet(BaseViewSet):
                 pk__in=issues,
             ).values_list("id", flat=True)
         )
-        _ = ModuleIssue.objects.bulk_create(
-            [
-                ModuleIssue(
+        with transaction.atomic():
+            created_records = ModuleIssue.objects.bulk_create(
+                [
+                    ModuleIssue(
+                        issue_id=str(issue),
+                        module_id=module_id,
+                        project_id=project_id,
+                        workspace_id=project.workspace_id,
+                        created_by=request.user,
+                        updated_by=request.user,
+                    )
+                    for issue in issues
+                ],
+                batch_size=10,
+                ignore_conflicts=True,
+            )
+            # Bulk Update the activity
+            _ = [
+                issue_activity.delay(
+                    type="module.activity.created",
+                    requested_data=json.dumps({"module_id": str(module_id)}),
+                    actor_id=str(request.user.id),
                     issue_id=str(issue),
-                    module_id=module_id,
                     project_id=project_id,
-                    workspace_id=project.workspace_id,
-                    created_by=request.user,
-                    updated_by=request.user,
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
                 )
                 for issue in issues
-            ],
-            batch_size=10,
-            ignore_conflicts=True,
-        )
-        # Bulk Update the activity
-        _ = [
-            issue_activity.delay(
-                type="module.activity.created",
-                requested_data=json.dumps({"module_id": str(module_id)}),
-                actor_id=str(request.user.id),
-                issue_id=str(issue),
-                project_id=project_id,
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            for issue in issues
-        ]
+            ]
+
+            # Outbox: one event per module-issue link, not one per request.
+            event_ids = []
+            for record in created_records:
+                if record.id is None:
+                    # Skipped by ignore_conflicts — no row was actually created.
+                    continue
+                event = write_event(
+                    workspace_id=project.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=record.id,
+                    event_type="module_issue.created",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
+                )
+                event_ids.append(str(event.id))
+
+            def _dispatch_events():
+                for event_id in event_ids:
+                    dispatch_event.delay(event_log_id=event_id)
+
+            transaction.on_commit(_dispatch_events, robust=True)
+
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -260,65 +287,94 @@ class ModuleIssueViewSet(BaseViewSet):
         removed_modules = request.data.get("removed_modules", [])
         project = Project.objects.get(pk=project_id)
 
-        if modules:
-            _ = ModuleIssue.objects.bulk_create(
-                [
-                    ModuleIssue(
+        with transaction.atomic():
+            event_ids = []
+
+            if modules:
+                created_records = ModuleIssue.objects.bulk_create(
+                    [
+                        ModuleIssue(
+                            issue_id=issue_id,
+                            module_id=module,
+                            project_id=project_id,
+                            workspace_id=project.workspace_id,
+                            created_by=request.user,
+                            updated_by=request.user,
+                        )
+                        for module in modules
+                    ],
+                    batch_size=10,
+                    ignore_conflicts=True,
+                )
+                # Bulk Update the activity
+                _ = [
+                    issue_activity.delay(
+                        type="module.activity.created",
+                        requested_data=json.dumps({"module_id": module}),
+                        actor_id=str(request.user.id),
                         issue_id=issue_id,
-                        module_id=module,
                         project_id=project_id,
-                        workspace_id=project.workspace_id,
-                        created_by=request.user,
-                        updated_by=request.user,
+                        current_instance=None,
+                        epoch=int(timezone.now().timestamp()),
+                        notification=True,
+                        origin=base_host(request=request, is_app=True),
                     )
                     for module in modules
-                ],
-                batch_size=10,
-                ignore_conflicts=True,
-            )
-            # Bulk Update the activity
-            _ = [
-                issue_activity.delay(
-                    type="module.activity.created",
-                    requested_data=json.dumps({"module_id": module}),
-                    actor_id=str(request.user.id),
-                    issue_id=issue_id,
+                ]
+                for record in created_records:
+                    if record.id is None:
+                        # Skipped by ignore_conflicts — no row was actually created.
+                        continue
+                    event = write_event(
+                        workspace_id=project.workspace_id,
+                        project_id=project_id,
+                        entity_type="module_issue",
+                        entity_id=record.id,
+                        event_type="module_issue.created",
+                        actor_id=request.user.id,
+                        data={"id": str(record.id), "module_id": str(record.module_id), "issue_id": str(issue_id)},
+                    )
+                    event_ids.append(str(event.id))
+
+            for module_id in removed_modules:
+                module_issue = ModuleIssue.objects.filter(
+                    workspace__slug=slug,
                     project_id=project_id,
-                    current_instance=None,
+                    module_id=module_id,
+                    issue_id=issue_id,
+                )
+                existing = module_issue.first()
+                issue_activity.delay(
+                    type="module.activity.deleted",
+                    requested_data=json.dumps({"module_id": str(module_id)}),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=json.dumps(
+                        {"module_name": (existing.module.name if (existing and existing.module) else None)}
+                    ),
                     epoch=int(timezone.now().timestamp()),
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                for module in modules
-            ]
+                module_issue.delete()
 
-        for module_id in removed_modules:
-            module_issue = ModuleIssue.objects.filter(
-                workspace__slug=slug,
-                project_id=project_id,
-                module_id=module_id,
-                issue_id=issue_id,
-            )
-            issue_activity.delay(
-                type="module.activity.deleted",
-                requested_data=json.dumps({"module_id": str(module_id)}),
-                actor_id=str(request.user.id),
-                issue_id=str(issue_id),
-                project_id=str(project_id),
-                current_instance=json.dumps(
-                    {
-                        "module_name": (
-                            module_issue.first().module.name
-                            if (module_issue.first() and module_issue.first().module)
-                            else None
-                        )
-                    }
-                ),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            module_issue.delete()
+                if existing is not None:
+                    event = write_event(
+                        workspace_id=existing.workspace_id,
+                        project_id=project_id,
+                        entity_type="module_issue",
+                        entity_id=existing.id,
+                        event_type="module_issue.deleted",
+                        actor_id=request.user.id,
+                    )
+                    event_ids.append(str(event.id))
+
+            def _dispatch_events():
+                for event_id in event_ids:
+                    dispatch_event.delay(event_log_id=event_id)
+
+            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
@@ -330,16 +386,29 @@ class ModuleIssueViewSet(BaseViewSet):
             module_id=module_id,
             issue_id=issue_id,
         )
-        issue_activity.delay(
-            type="module.activity.deleted",
-            requested_data=json.dumps({"module_id": str(module_id)}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=json.dumps({"module_name": module_issue.first().module.name}),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
-        module_issue.delete()
+        with transaction.atomic():
+            existing = module_issue.first()
+            issue_activity.delay(
+                type="module.activity.deleted",
+                requested_data=json.dumps({"module_id": str(module_id)}),
+                actor_id=str(request.user.id),
+                issue_id=str(issue_id),
+                project_id=str(project_id),
+                current_instance=json.dumps({"module_name": existing.module.name}),
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+            module_issue.delete()
+
+            if existing is not None:
+                event = write_event(
+                    workspace_id=existing.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=existing.id,
+                    event_type="module_issue.deleted",
+                    actor_id=request.user.id,
+                )
+                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

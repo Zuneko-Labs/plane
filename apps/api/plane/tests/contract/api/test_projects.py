@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from datetime import timedelta
 from unittest import mock
 from uuid import uuid4
 
 import pytest
+from django.utils import timezone
 from rest_framework import status
 
-from plane.db.models import Project, ProjectMember, State, User, WorkspaceMember
+from plane.db.models import EventLog, Project, ProjectMember, State, User, WorkspaceMember
 
 
 @pytest.fixture
@@ -120,6 +122,11 @@ class TestProjectListCreateAPIEndpoint:
         project = Project.objects.get(id=response.data["id"])
         assert ProjectMember.objects.filter(project=project, member=create_user, role=20).count() == 1
         assert State.objects.filter(project=project).count() == 5
+        # The outbox event committed alongside the project itself.
+        event = EventLog.objects.get(entity_type="project", entity_id=project.id)
+        assert event.event_type == "project.created"
+        assert event.workspace_id == workspace.id
+        assert event.dispatch_seq is None  # pending — dispatch_event hasn't run yet
 
     @pytest.mark.django_db
     def test_create_project_with_lead_not_in_workspace_returns_400(self, api_key_client, workspace, outsider_user):
@@ -179,6 +186,9 @@ class TestProjectListCreateAPIEndpoint:
         assert Project.objects.count() == 0
         assert ProjectMember.objects.count() == 0
         assert State.objects.count() == 0
+        # The outbox write happens in the same transaction.atomic() block,
+        # after State.objects.bulk_create — it must not survive the rollback.
+        assert EventLog.objects.count() == 0
         # And the deferred Celery task must not have been dispatched —
         # transaction.on_commit() callbacks only fire on a successful commit.
         mocked_activity.delay.assert_not_called()
@@ -228,6 +238,50 @@ class TestProjectListCreateAPIEndpoint:
 
         assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
 
+    @pytest.mark.django_db
+    def test_list_without_updated_at_gte_is_unchanged(self, api_key_client, workspace, create_user):
+        """Regression guard: adding the optional updated_at__gte filter must
+        not change the default (unfiltered) result set."""
+        project = Project.objects.create(
+            name="Unfiltered Project",
+            identifier="UF",
+            workspace=workspace,
+            created_by=create_user,
+        )
+        ProjectMember.objects.create(project=project, member=create_user, role=20)
+
+        response = api_key_client.get(self.get_url(workspace.slug))
+
+        assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
+        assert str(project.id) in [str(p["id"]) for p in response.data["results"]]
+
+    @pytest.mark.django_db
+    def test_list_updated_at_gte_filters_out_stale_projects(self, api_key_client, workspace, create_user):
+        old = Project.objects.create(
+            name="Old Project", identifier="OLD", workspace=workspace, created_by=create_user
+        )
+        ProjectMember.objects.create(project=old, member=create_user, role=20)
+        recent = Project.objects.create(
+            name="Recent Project", identifier="REC", workspace=workspace, created_by=create_user
+        )
+        ProjectMember.objects.create(project=recent, member=create_user, role=20)
+
+        cutoff = timezone.now()
+        Project.objects.filter(pk=old.pk).update(updated_at=cutoff - timedelta(days=1))
+        Project.objects.filter(pk=recent.pk).update(updated_at=cutoff + timedelta(days=1))
+
+        response = api_key_client.get(self.get_url(workspace.slug), {"updated_at__gte": cutoff.isoformat()})
+
+        assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
+        names = {p["name"] for p in response.data["results"]}
+        assert names == {"Recent Project"}
+
+    @pytest.mark.django_db
+    def test_list_invalid_updated_at_gte_returns_400(self, api_key_client, workspace, create_user):
+        response = api_key_client.get(self.get_url(workspace.slug), {"updated_at__gte": "not-a-date"})
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+
     @pytest.mark.django_db(transaction=True)
     def test_response_still_201_when_broker_dispatch_fails(self, api_key_client, workspace, create_user):
         """If model_activity.delay raises *after* the atomic block has
@@ -259,3 +313,41 @@ class TestProjectListCreateAPIEndpoint:
         # The dispatch was attempted but its failure was swallowed by
         # transaction.on_commit(robust=True).
         mocked_activity.delay.assert_called_once()
+
+
+@pytest.mark.contract
+class TestProjectArchiveUnarchive:
+    """Phase 5: archive/unarchive previously emitted no event at all."""
+
+    def get_url(self, workspace_slug, project_id):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/archive/"
+
+    @pytest.mark.django_db
+    def test_archive_writes_an_event(self, api_key_client, workspace, create_user):
+        project = Project.objects.create(name="Archive Me", identifier="AM", workspace=workspace, created_by=create_user)
+        ProjectMember.objects.create(project=project, member=create_user, role=20, is_active=True)
+
+        response = api_key_client.post(self.get_url(workspace.slug, project.id))
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.get(entity_type="project", entity_id=project.id, event_type="project.archived")
+        assert event.workspace_id == workspace.id
+        assert event.data is not None
+        assert event.changes is None
+
+    @pytest.mark.django_db
+    def test_unarchive_writes_an_event(self, api_key_client, workspace, create_user):
+        project = Project.objects.create(
+            name="Unarchive Me",
+            identifier="UM",
+            workspace=workspace,
+            created_by=create_user,
+            archived_at="2026-01-01T00:00:00Z",
+        )
+        ProjectMember.objects.create(project=project, member=create_user, role=20, is_active=True)
+
+        response = api_key_client.delete(self.get_url(workspace.slug, project.id))
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.get(entity_type="project", entity_id=project.id, event_type="project.unarchived")
+        assert event.workspace_id == workspace.id

@@ -9,6 +9,7 @@ import json
 from django.core import serializers
 from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import (
     Count,
     F,
@@ -49,6 +50,13 @@ from plane.utils.cycle_transfer_issues import transfer_cycle_issues
 from plane.utils.order_queryset import ISSUE_ORDER_BY_ALLOWLIST, sanitize_order_by
 from plane.utils.host import base_host
 from .base import BaseAPIView
+from plane.bgtasks.event_outbox import (
+    dispatch_event,
+    write_archive_event,
+    write_delete_event,
+    write_event,
+    write_model_event,
+)
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.openapi.decorators import cycle_docs
 from plane.utils.openapi import (
@@ -333,19 +341,35 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
-                serializer.save(project_id=project_id)
-                # Send the model activity
-                model_activity.delay(
-                    model_name="cycle",
-                    model_id=str(serializer.instance.id),
-                    requested_data=request.data,
-                    current_instance=None,
-                    actor_id=request.user.id,
-                    slug=slug,
-                    origin=base_host(request=request, is_app=True),
-                )
+                with transaction.atomic():
+                    serializer.save(project_id=project_id)
+                    cycle = Cycle.objects.get(pk=serializer.instance.id)
 
-                cycle = Cycle.objects.get(pk=serializer.instance.id)
+                    event = write_model_event(
+                        model_name="cycle",
+                        model_id=str(cycle.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=cycle.workspace_id,
+                        project_id=cycle.project_id,
+                    )
+
+                    # Send the model activity
+                    def _dispatch_model_activity():
+                        model_activity.delay(
+                            model_name="cycle",
+                            model_id=str(cycle.id),
+                            requested_data=request.data,
+                            current_instance=None,
+                            actor_id=request.user.id,
+                            slug=slug,
+                            origin=base_host(request=request, is_app=True),
+                        )
+                        dispatch_event.delay(event_log_id=str(event.id))
+
+                    transaction.on_commit(_dispatch_model_activity, robust=True)
+
                 serializer = CycleSerializer(cycle)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -540,19 +564,35 @@ class CycleDetailAPIEndpoint(BaseAPIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+                cycle = Cycle.objects.get(pk=serializer.instance.id)
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="cycle",
-                model_id=str(serializer.instance.id),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
-            cycle = Cycle.objects.get(pk=serializer.instance.id)
+                event = write_model_event(
+                    model_name="cycle",
+                    model_id=str(cycle.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=cycle.workspace_id,
+                    project_id=cycle.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="cycle",
+                        model_id=str(cycle.id),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             serializer = CycleSerializer(cycle)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -603,10 +643,21 @@ class CycleDetailAPIEndpoint(BaseAPIView):
             current_instance=None,
             epoch=int(timezone.now().timestamp()),
         )
-        # Delete the cycle
-        cycle.delete()
-        # Delete the user favorite cycle
-        UserFavorite.objects.filter(entity_type="cycle", entity_identifier=pk, project_id=project_id).delete()
+        workspace_id = cycle.workspace_id
+        with transaction.atomic():
+            # Delete the cycle
+            cycle.delete()
+            # Delete the user favorite cycle
+            UserFavorite.objects.filter(entity_type="cycle", entity_identifier=pk, project_id=project_id).delete()
+
+            event = write_delete_event(
+                model_name="cycle",
+                entity_id=pk,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -769,14 +820,25 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 {"error": "Only completed cycles can be archived"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        cycle.archived_at = timezone.now()
-        cycle.save()
-        UserFavorite.objects.filter(
-            entity_type="cycle",
-            entity_identifier=cycle_id,
-            project_id=project_id,
-            workspace__slug=slug,
-        ).delete()
+        with transaction.atomic():
+            cycle.archived_at = timezone.now()
+            cycle.save()
+            UserFavorite.objects.filter(
+                entity_type="cycle",
+                entity_identifier=cycle_id,
+                project_id=project_id,
+                workspace__slug=slug,
+            ).delete()
+
+            event = write_archive_event(
+                model_name="cycle",
+                model_id=str(cycle.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=cycle.workspace_id,
+                project_id=cycle.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @cycle_docs(
@@ -795,8 +857,19 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
         The cycle will reappear in active cycle lists.
         """
         cycle = Cycle.objects.get(pk=cycle_id, project_id=project_id, workspace__slug=slug)
-        cycle.archived_at = None
-        cycle.save()
+        with transaction.atomic():
+            cycle.archived_at = None
+            cycle.save()
+
+            event = write_archive_event(
+                model_name="cycle",
+                model_id=str(cycle.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=cycle.workspace_id,
+                project_id=cycle.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -939,77 +1012,114 @@ class CycleIssueListCreateAPIEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get all CycleWorkItems already created
-        cycle_issues = list(CycleIssue.objects.filter(~Q(cycle_id=cycle_id), issue_id__in=issues))
-        existing_issues = [
-            str(cycle_issue.issue_id) for cycle_issue in cycle_issues if str(cycle_issue.issue_id) in issues
-        ]
-        new_issues = list(set(issues) - set(existing_issues))
+        with transaction.atomic():
+            # Get all CycleWorkItems already created
+            cycle_issues = list(CycleIssue.objects.filter(~Q(cycle_id=cycle_id), issue_id__in=issues))
+            existing_issues = [
+                str(cycle_issue.issue_id) for cycle_issue in cycle_issues if str(cycle_issue.issue_id) in issues
+            ]
+            new_issues = list(set(issues) - set(existing_issues))
 
-        # Scope to workspace+project to prevent cross-tenant IDOR
-        new_issues = list(
-            str(i)
-            for i in Issue.issue_objects.filter(
-                workspace__slug=slug,
-                project_id=project_id,
-                pk__in=new_issues,
-            ).values_list("id", flat=True)
-        )
-
-        # New issues to create
-        created_records = CycleIssue.objects.bulk_create(
-            [
-                CycleIssue(
+            # Scope to workspace+project to prevent cross-tenant IDOR
+            new_issues = list(
+                str(i)
+                for i in Issue.issue_objects.filter(
+                    workspace__slug=slug,
                     project_id=project_id,
-                    workspace_id=cycle.workspace_id,
-                    cycle_id=cycle_id,
-                    issue_id=issue,
-                )
-                for issue in new_issues
-            ],
-            ignore_conflicts=True,
-            batch_size=10,
-        )
-
-        # Updated Issues
-        updated_records = []
-        update_cycle_issue_activity = []
-        # Iterate over each cycle_issue in cycle_issues
-        for cycle_issue in cycle_issues:
-            old_cycle_id = cycle_issue.cycle_id
-            # Update the cycle_issue's cycle_id
-            cycle_issue.cycle_id = cycle_id
-            # Add the modified cycle_issue to the records_to_update list
-            updated_records.append(cycle_issue)
-            # Record the update activity
-            update_cycle_issue_activity.append(
-                {
-                    "old_cycle_id": str(old_cycle_id),
-                    "new_cycle_id": str(cycle_id),
-                    "issue_id": str(cycle_issue.issue_id),
-                }
+                    pk__in=new_issues,
+                ).values_list("id", flat=True)
             )
 
-        # Update the cycle issues
-        CycleIssue.objects.bulk_update(updated_records, ["cycle_id"], batch_size=100)
+            # New issues to create
+            created_records = CycleIssue.objects.bulk_create(
+                [
+                    CycleIssue(
+                        project_id=project_id,
+                        workspace_id=cycle.workspace_id,
+                        cycle_id=cycle_id,
+                        issue_id=issue,
+                    )
+                    for issue in new_issues
+                ],
+                ignore_conflicts=True,
+                batch_size=10,
+            )
 
-        # Capture Issue Activity
-        issue_activity.delay(
-            type="cycle.activity.created",
-            requested_data=json.dumps({"cycles_list": issues}),
-            actor_id=str(self.request.user.id),
-            issue_id=None,
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=json.dumps(
-                {
-                    "updated_cycle_issues": update_cycle_issue_activity,
-                    "created_cycle_issues": serializers.serialize("json", created_records),
-                }
-            ),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+            # Updated Issues
+            updated_records = []
+            update_cycle_issue_activity = []
+            # Iterate over each cycle_issue in cycle_issues
+            for cycle_issue in cycle_issues:
+                old_cycle_id = cycle_issue.cycle_id
+                # Update the cycle_issue's cycle_id
+                cycle_issue.cycle_id = cycle_id
+                # Add the modified cycle_issue to the records_to_update list
+                updated_records.append(cycle_issue)
+                # Record the update activity
+                update_cycle_issue_activity.append(
+                    {
+                        "old_cycle_id": str(old_cycle_id),
+                        "new_cycle_id": str(cycle_id),
+                        "issue_id": str(cycle_issue.issue_id),
+                    }
+                )
+
+            # Update the cycle issues
+            CycleIssue.objects.bulk_update(updated_records, ["cycle_id"], batch_size=100)
+
+            # Capture Issue Activity
+            issue_activity.delay(
+                type="cycle.activity.created",
+                requested_data=json.dumps({"cycles_list": issues}),
+                actor_id=str(self.request.user.id),
+                issue_id=None,
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=json.dumps(
+                    {
+                        "updated_cycle_issues": update_cycle_issue_activity,
+                        "created_cycle_issues": serializers.serialize("json", created_records),
+                    }
+                ),
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+
+            # Outbox: one event per added/moved cycle-issue link, not one per request.
+            event_ids = []
+            for record in created_records:
+                if record.id is None:
+                    # Skipped by ignore_conflicts — no row was actually created.
+                    continue
+                event = write_event(
+                    workspace_id=cycle.workspace_id,
+                    project_id=project_id,
+                    entity_type="cycle_issue",
+                    entity_id=record.id,
+                    event_type="cycle_issue.created",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
+                )
+                event_ids.append(str(event.id))
+            for record, activity in zip(updated_records, update_cycle_issue_activity):
+                event = write_event(
+                    workspace_id=cycle.workspace_id,
+                    project_id=project_id,
+                    entity_type="cycle_issue",
+                    entity_id=record.id,
+                    event_type="cycle_issue.updated",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
+                    changes={"cycle_id": {"old": activity["old_cycle_id"], "new": activity["new_cycle_id"]}},
+                )
+                event_ids.append(str(event.id))
+
+            def _dispatch_events():
+                for event_id in event_ids:
+                    dispatch_event.delay(event_log_id=event_id)
+
+            transaction.on_commit(_dispatch_events, robust=True)
+
         # Return all Cycle Issues
         return Response(
             CycleIssueSerializer(self.get_queryset(), many=True).data,
@@ -1103,21 +1213,34 @@ class CycleIssueDetailAPIEndpoint(BaseAPIView):
             cycle_id=cycle_id,
         )
         issue_id = cycle_issue.issue_id
-        cycle_issue.delete()
-        issue_activity.delay(
-            type="cycle.activity.deleted",
-            requested_data=json.dumps(
-                {
-                    "cycle_id": str(self.kwargs.get("cycle_id")),
-                    "issues": [str(issue_id)],
-                }
-            ),
-            actor_id=str(self.request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-        )
+        with transaction.atomic():
+            cycle_issue_id = cycle_issue.id
+            workspace_id = cycle_issue.workspace_id
+            cycle_issue.delete()
+            issue_activity.delay(
+                type="cycle.activity.deleted",
+                requested_data=json.dumps(
+                    {
+                        "cycle_id": str(self.kwargs.get("cycle_id")),
+                        "issues": [str(issue_id)],
+                    }
+                ),
+                actor_id=str(self.request.user.id),
+                issue_id=str(issue_id),
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=None,
+                epoch=int(timezone.now().timestamp()),
+            )
+
+            event = write_event(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                entity_type="cycle_issue",
+                entity_id=cycle_issue_id,
+                event_type="cycle_issue.deleted",
+                actor_id=request.user.id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

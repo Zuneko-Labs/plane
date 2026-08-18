@@ -9,7 +9,7 @@ import json
 from django.utils import timezone
 from django.db.models import Exists
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 
 # Third Party imports
 from rest_framework.response import Response
@@ -22,6 +22,7 @@ from plane.app.permissions import allow_permission, ROLE
 from plane.db.models import IssueComment, ProjectMember, CommentReaction, Project, Issue
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.host import base_host
+from plane.bgtasks.event_outbox import dispatch_event, write_model_event
 from plane.bgtasks.webhook_task import model_activity
 
 
@@ -81,28 +82,45 @@ class IssueCommentViewSet(BaseViewSet):
             )
         serializer = IssueCommentSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(project_id=project_id, issue_id=issue_id, actor=request.user)
-            issue_activity.delay(
-                type="comment.activity.created",
-                requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                actor_id=str(self.request.user.id),
-                issue_id=str(self.kwargs.get("issue_id")),
-                project_id=str(self.kwargs.get("project_id")),
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue_comment",
-                model_id=str(serializer.data["id"]),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+            with transaction.atomic():
+                serializer.save(project_id=project_id, issue_id=issue_id, actor=request.user)
+                issue_activity.delay(
+                    type="comment.activity.created",
+                    requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                    actor_id=str(self.request.user.id),
+                    issue_id=str(self.kwargs.get("issue_id")),
+                    project_id=str(self.kwargs.get("project_id")),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+                event = write_model_event(
+                    model_name="issue_comment",
+                    model_id=str(serializer.data["id"]),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue_comment",
+                        model_id=str(serializer.data["id"]),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -113,31 +131,48 @@ class IssueCommentViewSet(BaseViewSet):
         current_instance = json.dumps(IssueCommentSerializer(issue_comment).data, cls=DjangoJSONEncoder)
         serializer = IssueCommentSerializer(issue_comment, data=request.data, partial=True)
         if serializer.is_valid():
-            if "comment_html" in request.data and request.data["comment_html"] != issue_comment.comment_html:
-                serializer.save(edited_at=timezone.now())
-            else:
-                serializer.save()
-            issue_activity.delay(
-                type="comment.activity.updated",
-                requested_data=requested_data,
-                actor_id=str(request.user.id),
-                issue_id=str(issue_id),
-                project_id=str(project_id),
-                current_instance=current_instance,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue_comment",
-                model_id=str(pk),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+            with transaction.atomic():
+                if "comment_html" in request.data and request.data["comment_html"] != issue_comment.comment_html:
+                    serializer.save(edited_at=timezone.now())
+                else:
+                    serializer.save()
+                issue_activity.delay(
+                    type="comment.activity.updated",
+                    requested_data=requested_data,
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=current_instance,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+                event = write_model_event(
+                    model_name="issue_comment",
+                    model_id=str(pk),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=issue_comment.workspace_id,
+                    project_id=issue_comment.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue_comment",
+                        model_id=str(pk),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

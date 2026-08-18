@@ -100,6 +100,7 @@ def save_webhook_log(
     response_body: str,
     retry_count: int,
     event_type: str,
+    outbox_event_id: Optional[str] = None,
 ) -> None:
     log_data = {
         "workspace_id": str(webhook.workspace_id),
@@ -112,6 +113,7 @@ def save_webhook_log(
         "response_headers": str(response_headers),
         "response_body": str(response_body),
         "retry_count": retry_count,
+        "outbox_event_id": outbox_event_id,
     }
 
     try:
@@ -236,6 +238,7 @@ def send_webhook_deactivation_email(webhook_id: str, receiver_id: str, current_s
     bind=True,
     autoretry_for=(requests.RequestException,),
     retry_backoff=600,
+    retry_backoff_max=3600,
     max_retries=5,
     retry_jitter=True,
 )
@@ -248,6 +251,8 @@ def webhook_send_task(
     action: str,
     current_site: str,
     activity: Optional[Dict[str, Any]],
+    outbox_event_id: Optional[str] = None,
+    dispatch_seq: Optional[int] = None,
 ) -> None:
     """
     Send webhook notifications to configured endpoints.
@@ -260,6 +265,9 @@ def webhook_send_task(
         action (str): HTTP method/action
         current_site (str): Current site URL
         activity (Optional[Dict[str, Any]]): Activity data
+        outbox_event_id (Optional[str]): The event_log row that triggered this
+            delivery, if any — lets a receiver dedupe across retries.
+        dispatch_seq (Optional[int]): That event's commit-ordered cursor value.
     """
     try:
         webhook = Webhook.objects.get(id=webhook_id, workspace__slug=slug)
@@ -291,13 +299,21 @@ def webhook_send_task(
             "workspace_slug": slug,
             "data": event_data,
             "activity": activity,
+            "outbox_event_id": outbox_event_id,
+            "dispatch_seq": dispatch_seq,
         }
+
+        # Serialize once — the HMAC must sign the exact bytes sent on the wire.
+        # Signing json.dumps(payload) while requests independently re-serializes
+        # `json=payload` verifies today only because both use identical default
+        # separators; that's coincidence, not a guarantee.
+        payload_bytes = json.dumps(payload).encode("utf-8")
 
         # Use HMAC for generating signature
         if webhook.secret_key:
             hmac_signature = hmac.new(
                 webhook.secret_key.encode("utf-8"),
-                json.dumps(payload).encode("utf-8"),
+                payload_bytes,
                 hashlib.sha256,
             )
             signature = hmac_signature.hexdigest()
@@ -307,6 +323,7 @@ def webhook_send_task(
         logger.error(f"Failed to send webhook: {e}")
         return
 
+    already_logged = False
     try:
         # Resolve + validate the webhook URL and pin the connection to the
         # validated IP. Pinning closes the DNS-rebinding TOCTOU (validating the
@@ -320,11 +337,13 @@ def webhook_send_task(
             allowed_ips=settings.WEBHOOK_ALLOWED_IPS,
             allowed_hosts=settings.WEBHOOK_ALLOWED_HOSTS,
             headers=headers,
-            json=payload,
+            data=payload_bytes,
             timeout=30,
         )
 
-        # Log the webhook request
+        # Log the webhook request — before raise_for_status, so a non-2xx
+        # response is recorded with its real status even though it is about
+        # to be treated as a failure below.
         save_webhook_log(
             webhook=webhook,
             request_method=action,
@@ -335,21 +354,30 @@ def webhook_send_task(
             response_body=response.text,
             retry_count=self.request.retries,
             event_type=event,
+            outbox_event_id=outbox_event_id,
         )
+        already_logged = True
+
+        # A non-2xx response must not be recorded as delivered — previously
+        # this fell through to "sent successfully" and was never retried.
+        response.raise_for_status()
+
         logger.info(f"Webhook {webhook.id} sent successfully")
     except requests.RequestException as e:
-        # Log the failed webhook request
-        save_webhook_log(
-            webhook=webhook,
-            request_method=action,
-            request_headers=headers,
-            request_body=payload,
-            response_status=500,
-            response_headers="",
-            response_body=str(e),
-            retry_count=self.request.retries,
-            event_type=event,
-        )
+        if not already_logged:
+            # Transport-level failure — no response was logged above.
+            save_webhook_log(
+                webhook=webhook,
+                request_method=action,
+                request_headers=headers,
+                request_body=payload,
+                response_status=getattr(e.response, "status_code", 500),
+                response_headers="",
+                response_body=str(e),
+                retry_count=self.request.retries,
+                event_type=event,
+                outbox_event_id=outbox_event_id,
+            )
         logger.error(f"Webhook {webhook.id} failed with error: {e}")
         # Retry logic
         if self.request.retries >= self.max_retries:
@@ -380,6 +408,7 @@ def webhook_send_task(
             response_body=f"Webhook URL rejected: {e}",
             retry_count=self.request.retries,
             event_type=event,
+            outbox_event_id=outbox_event_id,
         )
         logger.warning(f"Webhook {webhook.id} URL rejected: {e}")
         return

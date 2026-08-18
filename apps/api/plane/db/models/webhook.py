@@ -81,6 +81,10 @@ class WebhookLog(BaseModel):
     # Retry Count
     retry_count = models.PositiveSmallIntegerField(default=0)
 
+    # The event_log row (if any) that triggered this delivery — lets a
+    # receiver dedupe across retries of the same outbox event.
+    outbox_event_id = models.UUIDField(null=True, blank=True)
+
     class Meta:
         verbose_name = "Webhook Log"
         verbose_name_plural = "Webhook Logs"

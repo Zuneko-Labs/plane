@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from .event import WorkspaceEventsAPIEndpoint
 from .project import (
     ProjectListCreateAPIEndpoint,
     ProjectDetailAPIEndpoint,
@@ -47,6 +48,7 @@ from .module import (
     ModuleIssueListCreateAPIEndpoint,
     ModuleIssueDetailAPIEndpoint,
     ModuleArchiveUnarchiveAPIEndpoint,
+    WorkspaceModuleListAPIEndpoint,
 )
 
 from .member import ProjectMemberListCreateAPIEndpoint, ProjectMemberDetailAPIEndpoint, WorkspaceMemberAPIEndpoint

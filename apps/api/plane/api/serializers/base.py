@@ -72,47 +72,55 @@ class BaseSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         response = super().to_representation(instance)
 
-        # Ensure 'expand' is iterable before processing
-        if self.expand:
-            for expand in self.expand:
-                if expand in self.fields:
-                    # Import all the expandable serializers
-                    from . import (
-                        IssueSerializer,
-                        IssueLiteSerializer,
-                        ProjectLiteSerializer,
-                        StateLiteSerializer,
-                        UserLiteSerializer,
-                        WorkspaceLiteSerializer,
-                        EstimatePointSerializer,
-                    )
+        # Import all the expandable serializers
+        from . import (
+            IssueSerializer,
+            IssueLiteSerializer,
+            ProjectLiteSerializer,
+            StateLiteSerializer,
+            UserLiteSerializer,
+            WorkspaceLiteSerializer,
+            EstimatePointSerializer,
+        )
 
-                    # Expansion mapper
-                    expansion = {
-                        "user": UserLiteSerializer,
-                        "workspace": WorkspaceLiteSerializer,
-                        "project": ProjectLiteSerializer,
-                        "default_assignee": UserLiteSerializer,
-                        "project_lead": UserLiteSerializer,
-                        "state": StateLiteSerializer,
-                        "created_by": UserLiteSerializer,
-                        "updated_by": UserLiteSerializer,
-                        "issue": IssueSerializer,
-                        "actor": UserLiteSerializer,
-                        "owned_by": UserLiteSerializer,
-                        "members": UserLiteSerializer,
-                        "parent": IssueLiteSerializer,
-                        "estimate_point": EstimatePointSerializer,
-                    }
-                    # Check if field in expansion  then expand the field
-                    if expand in expansion:
-                        if isinstance(response.get(expand), list):
-                            exp_serializer = expansion[expand](getattr(instance, expand), many=True)
-                        else:
-                            exp_serializer = expansion[expand](getattr(instance, expand))
-                        response[expand] = exp_serializer.data
-                    else:
-                        # You might need to handle this case differently
-                        response[expand] = getattr(instance, f"{expand}_id", None)
+        # Expansion mapper — every FK/M2M field named here is always
+        # expanded to its full object instead of just its id.
+        expansion = {
+            "user": UserLiteSerializer,
+            "workspace": WorkspaceLiteSerializer,
+            "project": ProjectLiteSerializer,
+            "default_assignee": UserLiteSerializer,
+            "project_lead": UserLiteSerializer,
+            "lead": UserLiteSerializer,
+            "state": StateLiteSerializer,
+            "created_by": UserLiteSerializer,
+            "updated_by": UserLiteSerializer,
+            "issue": IssueSerializer,
+            "actor": UserLiteSerializer,
+            "owned_by": UserLiteSerializer,
+            "members": UserLiteSerializer,
+            "parent": IssueLiteSerializer,
+            "estimate_point": EstimatePointSerializer,
+        }
+
+        for field_name, expand_serializer in expansion.items():
+            if field_name not in self.fields:
+                continue
+            if not hasattr(instance, field_name):
+                continue
+
+            value = getattr(instance, field_name)
+            if value is None:
+                continue
+
+            try:
+                if hasattr(value, "all"):
+                    response[field_name] = expand_serializer(value.all(), many=True).data
+                elif isinstance(response.get(field_name), list):
+                    response[field_name] = expand_serializer(value, many=True).data
+                else:
+                    response[field_name] = expand_serializer(value).data
+            except Exception:
+                continue
 
         return response

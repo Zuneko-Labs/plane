@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from unittest import mock
+
 import pytest
 from rest_framework import status
 
-from plane.db.models import Issue, Project, ProjectMember, State
+from plane.db.models import EventLog, Issue, IssueComment, Project, ProjectMember, State
 
 
 @pytest.fixture
@@ -94,3 +96,88 @@ class TestIssueListOrderByInjection:
             assert response.status_code == status.HTTP_200_OK, (
                 f"order_by={value!r} got {response.status_code}: {response.data!r}"
             )
+
+
+@pytest.mark.contract
+class TestIssueOutboxWiring:
+    """Phase 4 outbox-wiring regressions for api/views/issue.py — the
+    largest, highest-merge-risk file in the sync architecture plan. Covers
+    the endpoints actually reachable via URL routing (create, patch, and
+    the comment sub-resource); the ``put`` upsert method on
+    IssueListCreateAPIEndpoint is pre-existing dead code — no URL pattern
+    registers PUT for it — and is out of scope here."""
+
+    def get_url(self, workspace_slug, project_id):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/"
+
+    def get_detail_url(self, workspace_slug, project_id, pk):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/{pk}/"
+
+    def get_comment_url(self, workspace_slug, project_id, issue_id):
+        return f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/{issue_id}/comments/"
+
+    @pytest.mark.django_db
+    def test_create_issue_writes_an_outbox_event(self, api_key_client, workspace, project, state):
+        url = self.get_url(workspace.slug, project.id)
+        response = api_key_client.post(url, {"name": "New Issue"}, format="json")
+
+        assert response.status_code == status.HTTP_201_CREATED, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.get(entity_type="issue", entity_id=response.data["id"])
+        assert event.event_type == "issue.created"
+        assert event.workspace_id == workspace.id
+        assert event.project_id == project.id
+        assert event.dispatch_seq is None
+
+    @pytest.mark.django_db
+    def test_patch_issue_records_a_diff(self, api_key_client, workspace, project, issue):
+        url = self.get_detail_url(workspace.slug, project.id, issue.id)
+        response = api_key_client.patch(url, {"name": "Renamed"}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.filter(entity_type="issue", entity_id=issue.id, event_type="issue.updated").get()
+        assert event.changes == {"name": {"old": "Test Issue", "new": "Renamed"}}
+
+    @pytest.mark.django_db
+    def test_no_outbox_event_survives_a_rolled_back_create(self, api_key_client, workspace, project, state):
+        url = self.get_url(workspace.slug, project.id)
+
+        with mock.patch(
+            "plane.api.views.issue.write_model_event",
+            side_effect=RuntimeError("forced failure for rollback test"),
+        ):
+            response = api_key_client.post(url, {"name": "Rollback Probe"}, format="json")
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR, (
+            f"Got {response.status_code}: {response.data!r}"
+        )
+        assert Issue.objects.filter(name="Rollback Probe").count() == 0
+        assert EventLog.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_create_comment_writes_an_outbox_event(self, api_key_client, workspace, project, issue):
+        url = self.get_comment_url(workspace.slug, project.id, issue.id)
+        response = api_key_client.post(url, {"comment_html": "<p>hello</p>"}, format="json")
+
+        assert response.status_code == status.HTTP_201_CREATED, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.get(entity_type="issue_comment", entity_id=response.data["id"])
+        assert event.event_type == "issue_comment.created"
+        assert event.workspace_id == workspace.id
+        assert event.project_id == project.id
+
+    @pytest.mark.django_db
+    def test_update_comment_records_a_diff(self, api_key_client, workspace, project, issue, create_user):
+        comment = IssueComment.objects.create(
+            project=project,
+            workspace=workspace,
+            issue=issue,
+            actor=create_user,
+            comment_html="<p>original</p>",
+        )
+        url = f"{self.get_comment_url(workspace.slug, project.id, issue.id)}{comment.id}/"
+        response = api_key_client.patch(url, {"comment_html": "<p>edited</p>"}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
+        event = EventLog.objects.filter(
+            entity_type="issue_comment", entity_id=comment.id, event_type="issue_comment.updated"
+        ).get()
+        assert event.changes is not None

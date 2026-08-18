@@ -7,12 +7,15 @@ import json
 
 # Django imports
 from django.core import serializers
+from django.db import transaction
 from django.db.models import Count, F, Func, OuterRef, Prefetch, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.core.serializers.json import DjangoJSONEncoder
 
 # Third party imports
 from rest_framework import status
+from rest_framework.exceptions import ParseError
 from rest_framework.response import Response
 from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
@@ -25,7 +28,7 @@ from plane.api.serializers import (
     ModuleCreateSerializer,
     ModuleUpdateSerializer,
 )
-from plane.app.permissions import ProjectEntityPermission
+from plane.app.permissions import ProjectEntityPermission, WorkspaceEntityPermission
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
     Issue,
@@ -40,6 +43,13 @@ from plane.db.models import (
 )
 
 from .base import BaseAPIView
+from plane.bgtasks.event_outbox import (
+    dispatch_event,
+    write_archive_event,
+    write_delete_event,
+    write_event,
+    write_model_event,
+)
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.host import base_host
 from plane.utils.order_queryset import ISSUE_ORDER_BY_ALLOWLIST, sanitize_order_by
@@ -225,18 +235,35 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            serializer.save()
-            # Send the model activity
-            model_activity.delay(
-                model_name="module",
-                model_id=str(serializer.instance.id),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
-            module = Module.objects.get(pk=serializer.instance.id)
+            with transaction.atomic():
+                serializer.save()
+                module = Module.objects.get(pk=serializer.instance.id)
+
+                event = write_model_event(
+                    model_name="module",
+                    model_id=str(module.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=module.workspace_id,
+                    project_id=module.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="module",
+                        model_id=str(module.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             serializer = ModuleSerializer(module)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -271,6 +298,48 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
         return self.paginate(
             request=request,
             queryset=(self.get_queryset().filter(archived_at__isnull=True)),
+            on_results=lambda modules: ModuleSerializer(
+                modules, many=True, fields=self.fields, expand=self.expand
+            ).data,
+        )
+
+
+class WorkspaceModuleListAPIEndpoint(BaseAPIView):
+    """Workspace Module List Endpoint
+
+    Lists modules across every project in a workspace in one call, with an
+    optional ``updated_at__gte`` filter for incremental sync — avoids one
+    API call per project for consumers syncing a whole workspace's modules.
+    """
+
+    serializer_class = ModuleSerializer
+    model = Module
+    permission_classes = [WorkspaceEntityPermission]
+    use_read_replica = True
+
+    def get_queryset(self):
+        return (
+            Module.objects.filter(workspace__slug=self.kwargs.get("slug"))
+            .filter(archived_at__isnull=True)
+            .select_related("project", "workspace")
+        )
+
+    def get(self, request, slug):
+        """List workspace modules
+
+        Retrieve all modules across every project in the workspace.
+        Supports an optional ``updated_at__gte`` filter for incremental sync.
+        """
+        queryset = self.get_queryset()
+        updated_at_gte = request.GET.get("updated_at__gte")
+        if updated_at_gte:
+            parsed = parse_datetime(updated_at_gte)
+            if parsed is None:
+                raise ParseError(f"Invalid updated_at__gte value: {updated_at_gte!r}")
+            queryset = queryset.filter(updated_at__gte=parsed)
+        return self.paginate(
+            request=request,
+            queryset=queryset,
             on_results=lambda modules: ModuleSerializer(
                 modules, many=True, fields=self.fields, expand=self.expand
             ).data,
@@ -434,18 +503,33 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="module",
-                model_id=str(serializer.instance.id),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                event = write_model_event(
+                    model_name="module",
+                    model_id=str(module.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=module.workspace_id,
+                    project_id=module.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="module",
+                        model_id=str(module.id),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -526,11 +610,22 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             epoch=int(timezone.now().timestamp()),
             origin=base_host(request=request, is_app=True),
         )
-        module.delete()
-        # Delete the module issues
-        ModuleIssue.objects.filter(module=pk, project_id=project_id).delete()
-        # Delete the user favorite module
-        UserFavorite.objects.filter(entity_type="module", entity_identifier=pk, project_id=project_id).delete()
+        workspace_id = module.workspace_id
+        with transaction.atomic():
+            module.delete()
+            # Delete the module issues
+            ModuleIssue.objects.filter(module=pk, project_id=project_id).delete()
+            # Delete the user favorite module
+            UserFavorite.objects.filter(entity_type="module", entity_identifier=pk, project_id=project_id).delete()
+
+            event = write_delete_event(
+                model_name="module",
+                entity_id=pk,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -675,58 +770,96 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             "id", flat=True
         )
 
-        module_issues = list(ModuleIssue.objects.filter(issue_id__in=issues))
+        with transaction.atomic():
+            module_issues = list(ModuleIssue.objects.filter(issue_id__in=issues))
 
-        update_module_issue_activity = []
-        records_to_update = []
-        record_to_create = []
+            update_module_issue_activity = []
+            records_to_update = []
+            record_to_create = []
 
-        for issue in issues:
-            module_issue = [module_issue for module_issue in module_issues if str(module_issue.issue_id) in issues]
+            for issue in issues:
+                module_issue = [
+                    module_issue for module_issue in module_issues if str(module_issue.issue_id) in issues
+                ]
 
-            if len(module_issue):
-                if module_issue[0].module_id != module_id:
-                    update_module_issue_activity.append(
-                        {
-                            "old_module_id": str(module_issue[0].module_id),
-                            "new_module_id": str(module_id),
-                            "issue_id": str(module_issue[0].issue_id),
-                        }
+                if len(module_issue):
+                    if module_issue[0].module_id != module_id:
+                        update_module_issue_activity.append(
+                            {
+                                "old_module_id": str(module_issue[0].module_id),
+                                "new_module_id": str(module_id),
+                                "issue_id": str(module_issue[0].issue_id),
+                            }
+                        )
+                        module_issue[0].module_id = module_id
+                        records_to_update.append(module_issue[0])
+                else:
+                    record_to_create.append(
+                        ModuleIssue(
+                            module=module,
+                            issue_id=issue,
+                            project_id=project_id,
+                            workspace=module.workspace,
+                            created_by=request.user,
+                            updated_by=request.user,
+                        )
                     )
-                    module_issue[0].module_id = module_id
-                    records_to_update.append(module_issue[0])
-            else:
-                record_to_create.append(
-                    ModuleIssue(
-                        module=module,
-                        issue_id=issue,
-                        project_id=project_id,
-                        workspace=module.workspace,
-                        created_by=request.user,
-                        updated_by=request.user,
-                    )
+
+            ModuleIssue.objects.bulk_create(record_to_create, batch_size=10, ignore_conflicts=True)
+
+            ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
+
+            # Capture Issue Activity
+            issue_activity.delay(
+                type="module.activity.created",
+                requested_data=json.dumps({"modules_list": str(issues)}),
+                actor_id=str(self.request.user.id),
+                issue_id=None,
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=json.dumps(
+                    {
+                        "updated_module_issues": update_module_issue_activity,
+                        "created_module_issues": serializers.serialize("json", record_to_create),
+                    }
+                ),
+                epoch=int(timezone.now().timestamp()),
+                origin=base_host(request=request, is_app=True),
+            )
+
+            # Outbox: one event per added/moved module-issue link, not one per request.
+            event_ids = []
+            for record in record_to_create:
+                if record.id is None:
+                    # Skipped by ignore_conflicts — no row was actually created.
+                    continue
+                event = write_event(
+                    workspace_id=module.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=record.id,
+                    event_type="module_issue.created",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
                 )
+                event_ids.append(str(event.id))
+            for record, activity in zip(records_to_update, update_module_issue_activity):
+                event = write_event(
+                    workspace_id=module.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=record.id,
+                    event_type="module_issue.updated",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
+                    changes={"module_id": {"old": activity["old_module_id"], "new": activity["new_module_id"]}},
+                )
+                event_ids.append(str(event.id))
 
-        ModuleIssue.objects.bulk_create(record_to_create, batch_size=10, ignore_conflicts=True)
+            def _dispatch_events():
+                for event_id in event_ids:
+                    dispatch_event.delay(event_log_id=event_id)
 
-        ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
-
-        # Capture Issue Activity
-        issue_activity.delay(
-            type="module.activity.created",
-            requested_data=json.dumps({"modules_list": str(issues)}),
-            actor_id=str(self.request.user.id),
-            issue_id=None,
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=json.dumps(
-                {
-                    "updated_module_issues": update_module_issue_activity,
-                    "created_module_issues": serializers.serialize("json", record_to_create),
-                }
-            ),
-            epoch=int(timezone.now().timestamp()),
-            origin=base_host(request=request, is_app=True),
-        )
+            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response(
             ModuleIssueSerializer(self.get_queryset(), many=True).data,
@@ -876,16 +1009,29 @@ class ModuleIssueDetailAPIEndpoint(BaseAPIView):
         )
 
         module_name = module_issue.module.name if module_issue.module is not None else ""
-        module_issue.delete()
-        issue_activity.delay(
-            type="module.activity.deleted",
-            requested_data=json.dumps({"module_id": str(module_id), "issues": [str(module_issue.issue_id)]}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=json.dumps({"module_name": module_name}),
-            epoch=int(timezone.now().timestamp()),
-        )
+        with transaction.atomic():
+            module_issue_id = module_issue.id
+            workspace_id = module_issue.workspace_id
+            module_issue.delete()
+            issue_activity.delay(
+                type="module.activity.deleted",
+                requested_data=json.dumps({"module_id": str(module_id), "issues": [str(module_issue.issue_id)]}),
+                actor_id=str(request.user.id),
+                issue_id=str(issue_id),
+                project_id=str(project_id),
+                current_instance=json.dumps({"module_name": module_name}),
+                epoch=int(timezone.now().timestamp()),
+            )
+
+            event = write_event(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                entity_type="module_issue",
+                entity_id=module_issue_id,
+                event_type="module_issue.deleted",
+                actor_id=request.user.id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1044,14 +1190,25 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 {"error": "Only completed or cancelled modules can be archived"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        module.archived_at = timezone.now()
-        module.save()
-        UserFavorite.objects.filter(
-            entity_type="module",
-            entity_identifier=pk,
-            project_id=project_id,
-            workspace__slug=slug,
-        ).delete()
+        with transaction.atomic():
+            module.archived_at = timezone.now()
+            module.save()
+            UserFavorite.objects.filter(
+                entity_type="module",
+                entity_identifier=pk,
+                project_id=project_id,
+                workspace__slug=slug,
+            ).delete()
+
+            event = write_archive_event(
+                model_name="module",
+                model_id=str(module.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=module.workspace_id,
+                project_id=module.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @module_docs(
@@ -1073,6 +1230,17 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
         The module will reappear in active module lists and become fully functional.
         """
         module = Module.objects.get(pk=pk, project_id=project_id, workspace__slug=slug)
-        module.archived_at = None
-        module.save()
+        with transaction.atomic():
+            module.archived_at = None
+            module.save()
+
+            event = write_archive_event(
+                model_name="module",
+                model_id=str(module.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=module.workspace_id,
+                project_id=module.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

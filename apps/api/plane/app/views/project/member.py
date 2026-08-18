@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import json
+
 # Third Party imports
 from rest_framework.response import Response
 from rest_framework import status
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import Min
 
 # Module imports
@@ -18,6 +22,7 @@ from plane.app.serializers import (
 
 from plane.app.permissions import WorkspaceUserPermission
 
+from plane.bgtasks.event_outbox import dispatch_event, write_model_event
 from plane.db.models import Project, ProjectMember, ProjectUserProperty, WorkspaceMember
 from plane.bgtasks.project_add_user_email_task import project_add_user_email
 from plane.utils.host import base_host
@@ -91,63 +96,83 @@ class ProjectMemberViewSet(BaseViewSet):
             project_member.is_active = True
             bulk_project_members.append(project_member)
 
-        # Update the roles of the existing members
-        ProjectMember.objects.bulk_update(bulk_project_members, ["is_active", "role"], batch_size=100)
+        with transaction.atomic():
+            # Update the roles of the existing members
+            ProjectMember.objects.bulk_update(bulk_project_members, ["is_active", "role"], batch_size=100)
 
-        # Get the minimum sort_order for each member in the workspace
-        member_sort_orders = (
-            ProjectUserProperty.objects.filter(
-                workspace__slug=slug,
-                user_id__in=[member.get("member_id") for member in members],
-            )
-            .values("user_id")
-            .annotate(min_sort_order=Min("sort_order"))
-        )
-        # Convert to dictionary for easy lookup: {user_id: min_sort_order}
-        sort_order_map = {str(item["user_id"]): item["min_sort_order"] for item in member_sort_orders}
-
-        # Loop through requested members
-        for member in members:
-            member_id = str(member.get("member_id"))
-            # Get the minimum sort_order for this member, or use default
-            min_sort_order = sort_order_map.get(member_id)
-            # Create a new project member
-            bulk_project_members.append(
-                ProjectMember(
-                    member_id=member.get("member_id"),
-                    role=member.get("role", 5),
-                    project_id=project_id,
-                    workspace_id=project.workspace_id,
+            # Get the minimum sort_order for each member in the workspace
+            member_sort_orders = (
+                ProjectUserProperty.objects.filter(
+                    workspace__slug=slug,
+                    user_id__in=[member.get("member_id") for member in members],
                 )
+                .values("user_id")
+                .annotate(min_sort_order=Min("sort_order"))
             )
-            # Create a new issue property
-            bulk_issue_props.append(
-                ProjectUserProperty(
-                    user_id=member.get("member_id"),
-                    project_id=project_id,
-                    workspace_id=project.workspace_id,
-                    sort_order=(min_sort_order - 10000 if min_sort_order is not None else 65535),
+            # Convert to dictionary for easy lookup: {user_id: min_sort_order}
+            sort_order_map = {str(item["user_id"]): item["min_sort_order"] for item in member_sort_orders}
+
+            # Loop through requested members
+            for member in members:
+                member_id = str(member.get("member_id"))
+                # Get the minimum sort_order for this member, or use default
+                min_sort_order = sort_order_map.get(member_id)
+                # Create a new project member
+                bulk_project_members.append(
+                    ProjectMember(
+                        member_id=member.get("member_id"),
+                        role=member.get("role", 5),
+                        project_id=project_id,
+                        workspace_id=project.workspace_id,
+                    )
                 )
+                # Create a new issue property
+                bulk_issue_props.append(
+                    ProjectUserProperty(
+                        user_id=member.get("member_id"),
+                        project_id=project_id,
+                        workspace_id=project.workspace_id,
+                        sort_order=(min_sort_order - 10000 if min_sort_order is not None else 65535),
+                    )
+                )
+
+            # Bulk create the project members and issue properties
+            project_members = ProjectMember.objects.bulk_create(
+                bulk_project_members, batch_size=10, ignore_conflicts=True
             )
 
-        # Bulk create the project members and issue properties
-        project_members = ProjectMember.objects.bulk_create(bulk_project_members, batch_size=10, ignore_conflicts=True)
+            _ = ProjectUserProperty.objects.bulk_create(bulk_issue_props, batch_size=10, ignore_conflicts=True)
 
-        _ = ProjectUserProperty.objects.bulk_create(bulk_issue_props, batch_size=10, ignore_conflicts=True)
-
-        project_members = ProjectMember.objects.filter(
-            project_id=project_id,
-            member_id__in=[member.get("member_id") for member in members],
-        )
-        # Send emails to notify the users
-        [
-            project_add_user_email.delay(
-                base_host(request=request, is_app=True),
-                project_member.id,
-                request.user.id,
+            project_members = ProjectMember.objects.filter(
+                project_id=project_id,
+                member_id__in=[member.get("member_id") for member in members],
             )
-            for project_member in project_members
-        ]
+
+            events = [
+                write_model_event(
+                    model_name="project_member",
+                    model_id=str(project_member.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=project_member.workspace_id,
+                    project_id=project_member.project_id,
+                )
+                for project_member in project_members
+            ]
+
+            def _dispatch_members_added():
+                for project_member in project_members:
+                    project_add_user_email.delay(
+                        base_host(request=request, is_app=True),
+                        project_member.id,
+                        request.user.id,
+                    )
+                for event in events:
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+            transaction.on_commit(_dispatch_members_added, robust=True)
+
         # Serialize the project members
         serializer = ProjectMemberRoleSerializer(project_members, many=True)
         # Return the serialized data
@@ -280,10 +305,23 @@ class ProjectMemberViewSet(BaseViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
+        current_instance = json.dumps(ProjectMemberSerializer(project_member).data, cls=DjangoJSONEncoder)
         serializer = ProjectMemberSerializer(project_member, data=request.data, partial=True)
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+
+                event = write_model_event(
+                    model_name="project_member",
+                    model_id=str(project_member.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=project_member.workspace_id,
+                    project_id=project_member.project_id,
+                )
+                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -316,8 +354,21 @@ class ProjectMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        current_instance = json.dumps(ProjectMemberSerializer(project_member).data, cls=DjangoJSONEncoder)
         project_member.is_active = False
-        project_member.save()
+        with transaction.atomic():
+            project_member.save()
+
+            event = write_model_event(
+                model_name="project_member",
+                model_id=str(project_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=project_member.workspace_id,
+                project_id=project_member.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
@@ -343,9 +394,22 @@ class ProjectMemberViewSet(BaseViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        current_instance = json.dumps(ProjectMemberSerializer(project_member).data, cls=DjangoJSONEncoder)
         # Deactivate the user
         project_member.is_active = False
-        project_member.save()
+        with transaction.atomic():
+            project_member.save()
+
+            event = write_model_event(
+                model_name="project_member",
+                model_id=str(project_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=project_member.workspace_id,
+                project_id=project_member.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

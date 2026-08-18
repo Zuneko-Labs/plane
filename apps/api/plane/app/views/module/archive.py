@@ -23,13 +23,14 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce, Cast, Concat
 from django.utils import timezone
-from django.db import models
+from django.db import models, transaction
 
 # Third party imports
 from rest_framework import status
 from rest_framework.response import Response
 from plane.app.permissions import ProjectEntityPermission
 from plane.app.serializers import ModuleDetailSerializer
+from plane.bgtasks.event_outbox import dispatch_event, write_archive_event
 from plane.db.models import Issue, Module, ModuleLink, UserFavorite, Project
 from plane.utils.analytics_plot import burndown_plot
 from plane.utils.timezone_converter import user_timezone_converter
@@ -548,18 +549,40 @@ class ModuleArchiveUnarchiveEndpoint(BaseAPIView):
                 {"error": "Only completed or cancelled modules can be archived"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        module.archived_at = timezone.now()
-        module.save()
-        UserFavorite.objects.filter(
-            entity_type="module",
-            entity_identifier=module_id,
-            project_id=project_id,
-            workspace__slug=slug,
-        ).delete()
+        with transaction.atomic():
+            module.archived_at = timezone.now()
+            module.save()
+            UserFavorite.objects.filter(
+                entity_type="module",
+                entity_identifier=module_id,
+                project_id=project_id,
+                workspace__slug=slug,
+            ).delete()
+
+            event = write_archive_event(
+                model_name="module",
+                model_id=str(module.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=module.workspace_id,
+                project_id=module.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response({"archived_at": str(module.archived_at)}, status=status.HTTP_200_OK)
 
     def delete(self, request, slug, project_id, module_id):
         module = Module.objects.get(pk=module_id, project_id=project_id, workspace__slug=slug)
-        module.archived_at = None
-        module.save()
+        with transaction.atomic():
+            module.archived_at = None
+            module.save()
+
+            event = write_archive_event(
+                model_name="module",
+                model_id=str(module.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=module.workspace_id,
+                project_id=module.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

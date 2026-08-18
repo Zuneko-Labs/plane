@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import json
+
+# Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
+
 # Third party imports
 from rest_framework.response import Response
 from rest_framework import status
@@ -10,6 +16,7 @@ from drf_spectacular.utils import OpenApiRequest, OpenApiResponse
 # Module imports
 from plane.app.permissions.project import ProjectEntityPermission
 from plane.api.views.base import BaseAPIView
+from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
 from plane.db.models import Estimate, EstimatePoint, Project, Workspace
 from plane.api.serializers import EstimateSerializer, EstimatePointSerializer
 from plane.utils.openapi.decorators import estimate_docs, estimate_point_docs
@@ -65,7 +72,20 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+            estimate = serializer.instance
+
+            event = write_model_event(
+                model_name="estimate",
+                model_id=str(estimate.id),
+                requested_data=request.data,
+                current_instance=None,
+                actor_id=request.user.id,
+                workspace_id=estimate.workspace_id,
+                project_id=estimate.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @estimate_docs(
@@ -112,10 +132,23 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
         if not filtered_data:
             serializer = self.serializer_class(estimate)
             return Response(serializer.data, status=status.HTTP_200_OK)
+        current_instance = json.dumps(self.serializer_class(estimate).data, cls=DjangoJSONEncoder)
         serializer = self.serializer_class(estimate, data=filtered_data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+
+            event = write_model_event(
+                model_name="estimate",
+                model_id=str(estimate.id),
+                requested_data=filtered_data,
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=estimate.workspace_id,
+                project_id=estimate.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @estimate_docs(
@@ -130,7 +163,20 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
         estimate = self.get_queryset().first()
         if not estimate:
             return Response(status=status.HTTP_404_NOT_FOUND, data={"error": "Estimate not found"})
-        estimate.delete()
+        with transaction.atomic():
+            estimate_id = str(estimate.id)
+            workspace_id = estimate.workspace_id
+            project_id = estimate.project_id
+            estimate.delete()
+
+            event = write_delete_event(
+                model_name="estimate",
+                entity_id=estimate_id,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -224,7 +270,24 @@ class EstimatePointListCreateAPIEndpoint(BaseAPIView):
             )
             for item in serializer.validated_data
         ]
-        created = EstimatePoint.objects.bulk_create(estimate_points)
+        with transaction.atomic():
+            created = EstimatePoint.objects.bulk_create(estimate_points)
+
+            events = [
+                write_model_event(
+                    model_name="estimate_point",
+                    model_id=str(point.id),
+                    requested_data=None,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=point.workspace_id,
+                    project_id=point.project_id,
+                )
+                for point in created
+            ]
+            transaction.on_commit(
+                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
+            )
         return Response(
             self.serializer_class(created, many=True).data,
             status=status.HTTP_201_CREATED,
@@ -269,10 +332,23 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
         filtered_data = {k: v for k, v in request.data.items() if k in ALLOWED_FIELDS}
         if not filtered_data:
             return Response(self.serializer_class(estimate_point).data, status=status.HTTP_200_OK)
+        current_instance = json.dumps(self.serializer_class(estimate_point).data, cls=DjangoJSONEncoder)
         serializer = self.serializer_class(estimate_point, data=filtered_data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+
+            event = write_model_event(
+                model_name="estimate_point",
+                model_id=str(estimate_point.id),
+                requested_data=filtered_data,
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=estimate_point.workspace_id,
+                project_id=estimate_point.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @estimate_point_docs(
@@ -287,5 +363,18 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
         estimate_point = self.get_queryset().filter(id=estimate_point_id).first()
         if not estimate_point:
             return Response(status=status.HTTP_404_NOT_FOUND, data={"error": "Estimate point not found"})
-        estimate_point.delete()
+        with transaction.atomic():
+            estimate_point_id = str(estimate_point.id)
+            workspace_id = estimate_point.workspace_id
+            project_id = estimate_point.project_id
+            estimate_point.delete()
+
+            event = write_delete_event(
+                model_name="estimate_point",
+                entity_id=estimate_point_id,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

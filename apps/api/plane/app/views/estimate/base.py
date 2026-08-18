@@ -7,6 +7,8 @@ import string
 import json
 
 # Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.utils import timezone
 
 # Third party imports
@@ -16,6 +18,7 @@ from rest_framework import status
 # Module imports
 from ..base import BaseViewSet, BaseAPIView
 from plane.app.permissions import ProjectEntityPermission, allow_permission, ROLE
+from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
 from plane.db.models import Project, Estimate, EstimatePoint, Issue
 from plane.app.serializers import (
     EstimateSerializer,
@@ -66,12 +69,6 @@ class BulkEstimatePointEndpoint(BaseViewSet):
         estimate_name = estimate.get("name", generate_random_name())
         estimate_type = estimate.get("type", "categories")
         last_used = estimate.get("last_used", False)
-        estimate = Estimate.objects.create(
-            name=estimate_name,
-            project_id=project_id,
-            last_used=last_used,
-            type=estimate_type,
-        )
 
         estimate_points = request.data.get("estimate_points", [])
 
@@ -79,23 +76,58 @@ class BulkEstimatePointEndpoint(BaseViewSet):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        estimate_points = EstimatePoint.objects.bulk_create(
-            [
-                EstimatePoint(
-                    estimate=estimate,
-                    key=estimate_point.get("key", 0),
-                    value=estimate_point.get("value", ""),
-                    description=estimate_point.get("description", ""),
-                    project_id=project_id,
+        with transaction.atomic():
+            estimate = Estimate.objects.create(
+                name=estimate_name,
+                project_id=project_id,
+                last_used=last_used,
+                type=estimate_type,
+            )
+
+            estimate_points = EstimatePoint.objects.bulk_create(
+                [
+                    EstimatePoint(
+                        estimate=estimate,
+                        key=estimate_point.get("key", 0),
+                        value=estimate_point.get("value", ""),
+                        description=estimate_point.get("description", ""),
+                        project_id=project_id,
+                        workspace_id=estimate.workspace_id,
+                        created_by=request.user,
+                        updated_by=request.user,
+                    )
+                    for estimate_point in estimate_points
+                ],
+                batch_size=10,
+                ignore_conflicts=True,
+            )
+
+            events = [
+                write_model_event(
+                    model_name="estimate",
+                    model_id=str(estimate.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
                     workspace_id=estimate.workspace_id,
-                    created_by=request.user,
-                    updated_by=request.user,
+                    project_id=estimate.project_id,
                 )
-                for estimate_point in estimate_points
-            ],
-            batch_size=10,
-            ignore_conflicts=True,
-        )
+            ] + [
+                write_model_event(
+                    model_name="estimate_point",
+                    model_id=str(point.id),
+                    requested_data=None,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=point.workspace_id,
+                    project_id=point.project_id,
+                )
+                for point in estimate_points
+                if point.id is not None  # skipped by ignore_conflicts — no row was actually created
+            ]
+            transaction.on_commit(
+                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
+            )
 
         serializer = EstimateReadSerializer(estimate)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -114,11 +146,7 @@ class BulkEstimatePointEndpoint(BaseViewSet):
             )
 
         estimate = Estimate.objects.get(pk=estimate_id, workspace__slug=slug, project_id=project_id)
-
-        if request.data.get("estimate"):
-            estimate.name = request.data.get("estimate").get("name", estimate.name)
-            estimate.type = request.data.get("estimate").get("type", estimate.type)
-            estimate.save()
+        current_instance = json.dumps(EstimateReadSerializer(estimate).data, cls=DjangoJSONEncoder)
 
         estimate_points_data = request.data.get("estimate_points", [])
 
@@ -130,15 +158,52 @@ class BulkEstimatePointEndpoint(BaseViewSet):
         )
 
         updated_estimate_points = []
+        prior_estimate_point_snapshots = {}
         for estimate_point in estimate_points:
             # Find the data for that estimate point
             estimate_point_data = [point for point in estimate_points_data if point.get("id") == str(estimate_point.id)]
             if len(estimate_point_data):
+                prior_estimate_point_snapshots[estimate_point.id] = {
+                    "key": estimate_point.key,
+                    "value": estimate_point.value,
+                }
                 estimate_point.value = estimate_point_data[0].get("value", estimate_point.value)
                 estimate_point.key = estimate_point_data[0].get("key", estimate_point.key)
                 updated_estimate_points.append(estimate_point)
 
-        EstimatePoint.objects.bulk_update(updated_estimate_points, ["key", "value"], batch_size=10)
+        with transaction.atomic():
+            if request.data.get("estimate"):
+                estimate.name = request.data.get("estimate").get("name", estimate.name)
+                estimate.type = request.data.get("estimate").get("type", estimate.type)
+                estimate.save()
+
+            EstimatePoint.objects.bulk_update(updated_estimate_points, ["key", "value"], batch_size=10)
+
+            events = [
+                write_model_event(
+                    model_name="estimate",
+                    model_id=str(estimate.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=estimate.workspace_id,
+                    project_id=estimate.project_id,
+                )
+            ] + [
+                write_model_event(
+                    model_name="estimate_point",
+                    model_id=str(point.id),
+                    requested_data={"key": point.key, "value": point.value},
+                    current_instance=prior_estimate_point_snapshots[point.id],
+                    actor_id=request.user.id,
+                    workspace_id=point.workspace_id,
+                    project_id=point.project_id,
+                )
+                for point in updated_estimate_points
+            ]
+            transaction.on_commit(
+                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
+            )
 
         estimate_serializer = EstimateReadSerializer(estimate)
         return Response(estimate_serializer.data, status=status.HTTP_200_OK)
@@ -146,7 +211,17 @@ class BulkEstimatePointEndpoint(BaseViewSet):
     @invalidate_cache(path="/api/workspaces/:slug/estimates/", url_params=True, user=False)
     def destroy(self, request, slug, project_id, estimate_id):
         estimate = Estimate.objects.get(pk=estimate_id, workspace__slug=slug, project_id=project_id)
-        estimate.delete()
+        with transaction.atomic():
+            estimate.delete()
+
+            event = write_delete_event(
+                model_name="estimate",
+                entity_id=str(estimate_id),
+                actor_id=request.user.id,
+                workspace_id=estimate.workspace_id,
+                project_id=estimate.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -172,9 +247,21 @@ class EstimatePointEndpoint(BaseViewSet):
             )
         key = request.data.get("key", 0)
         value = request.data.get("value", "")
-        estimate_point = EstimatePoint.objects.create(
-            estimate_id=estimate_id, project_id=project_id, key=key, value=value
-        )
+        with transaction.atomic():
+            estimate_point = EstimatePoint.objects.create(
+                estimate_id=estimate_id, project_id=project_id, key=key, value=value
+            )
+
+            event = write_model_event(
+                model_name="estimate_point",
+                model_id=str(estimate_point.id),
+                requested_data=request.data,
+                current_instance=None,
+                actor_id=request.user.id,
+                workspace_id=estimate_point.workspace_id,
+                project_id=estimate_point.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         serializer = EstimatePointSerializer(estimate_point).data
         return Response(serializer, status=status.HTTP_200_OK)
 
@@ -187,10 +274,23 @@ class EstimatePointEndpoint(BaseViewSet):
             project_id=project_id,
             workspace__slug=slug,
         )
+        current_instance = json.dumps(EstimatePointSerializer(estimate_point).data, cls=DjangoJSONEncoder)
         serializer = EstimatePointSerializer(estimate_point, data=request.data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+
+            event = write_model_event(
+                model_name="estimate_point",
+                model_id=str(estimate_point.id),
+                requested_data=request.data,
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=estimate_point.workspace_id,
+                project_id=estimate_point.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -258,9 +358,22 @@ class EstimatePointEndpoint(BaseViewSet):
                 estimate_point.key -= 1
                 updated_estimate_points.append(estimate_point)
 
-        EstimatePoint.objects.bulk_update(updated_estimate_points, ["key"], batch_size=10)
+        with transaction.atomic():
+            EstimatePoint.objects.bulk_update(updated_estimate_points, ["key"], batch_size=10)
 
-        old_estimate_point.delete()
+            old_point_id = old_estimate_point.id
+            workspace_id = old_estimate_point.workspace_id
+            old_point_project_id = old_estimate_point.project_id
+            old_estimate_point.delete()
+
+            event = write_delete_event(
+                model_name="estimate_point",
+                entity_id=str(old_point_id),
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=old_point_project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response(
             EstimatePointSerializer(updated_estimate_points, many=True).data,

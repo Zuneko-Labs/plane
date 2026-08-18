@@ -200,10 +200,6 @@ class ModuleSerializer(BaseSerializer):
             "deleted_at",
         ]
 
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["members"] = [str(member.id) for member in instance.members.all()]
-        return data
 
 
 class ModuleIssueSerializer(BaseSerializer):

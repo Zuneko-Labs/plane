@@ -3,10 +3,12 @@
 # See the LICENSE file for details.
 
 # Python imports
+import json
 import random
 
 # Django imports
-from django.db import IntegrityError
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import IntegrityError, transaction
 
 # Third Party imports
 from rest_framework.response import Response
@@ -16,6 +18,7 @@ from rest_framework import status
 from .. import BaseViewSet, BaseAPIView
 from plane.app.serializers import LabelSerializer
 from plane.app.permissions import allow_permission, ProjectBasePermission, ROLE
+from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
 from plane.db.models import Project, Label
 from plane.utils.cache import invalidate_cache
 
@@ -45,7 +48,20 @@ class LabelViewSet(BaseViewSet):
         try:
             serializer = LabelSerializer(data=request.data, context={"project_id": project_id})
             if serializer.is_valid():
-                serializer.save(project_id=project_id)
+                with transaction.atomic():
+                    serializer.save(project_id=project_id)
+                    label = serializer.instance
+
+                    event = write_model_event(
+                        model_name="label",
+                        model_id=str(label.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=label.workspace_id,
+                        project_id=label.project_id,
+                    )
+                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError:
@@ -69,22 +85,51 @@ class LabelViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        label = self.get_object()
+        current_instance = json.dumps(LabelSerializer(label).data, cls=DjangoJSONEncoder)
         serializer = LabelSerializer(
-            instance=self.get_object(),
+            instance=label,
             data=request.data,
             context={"project_id": kwargs["project_id"]},
             partial=True,
         )
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+
+                event = write_model_event(
+                    model_name="label",
+                    model_id=str(label.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=label.workspace_id,
+                    project_id=label.project_id,
+                )
+                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @invalidate_cache(path="/api/workspaces/:slug/labels/", url_params=True, user=False)
     @allow_permission([ROLE.ADMIN])
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        label = self.get_object()
+        label_id = str(label.id)
+        workspace_id = label.workspace_id
+        project_id = label.project_id
+        with transaction.atomic():
+            response = super().destroy(request, *args, **kwargs)
+
+            event = write_delete_event(
+                model_name="label",
+                entity_id=label_id,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
+        return response
 
 
 class BulkCreateIssueLabelsEndpoint(BaseAPIView):

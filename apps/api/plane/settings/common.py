@@ -451,6 +451,14 @@ WEBHOOK_LOG_RETENTION_DAYS = _retention_days("WEBHOOK_LOG_RETENTION_DAYS", 14)
 # Email notification logs are retained on their own window.
 EMAIL_LOG_RETENTION_DAYS = _retention_days("EMAIL_LOG_RETENTION_DAYS", 7)
 
+# How long a consumer may be offline before it's forced into a full resync
+# (GET /events/ returns 410 once its checkpoint falls behind this window).
+# 30 days gives a fortnight of slack over the longest existing log-retention
+# window (WEBHOOK_LOG/API_ACTIVITY_LOG at 14 days) without inventing a
+# quarter-long one; shorter than HARD_DELETE_AFTER_DAYS (60), consistent with
+# a consumer that missed a delete event having already been forced to resync.
+EVENT_LOG_RETENTION_DAYS = _retention_days("EVENT_LOG_RETENTION_DAYS", 30)
+
 # Instance Changelog URL
 INSTANCE_CHANGELOG_URL = os.environ.get("INSTANCE_CHANGELOG_URL", "")
 

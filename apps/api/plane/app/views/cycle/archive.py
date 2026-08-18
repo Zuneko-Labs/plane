@@ -5,7 +5,7 @@
 # Django imports
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
-from django.db import models
+from django.db import models, transaction
 from django.db.models import (
     Case,
     CharField,
@@ -30,6 +30,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from plane.app.permissions import allow_permission, ROLE
+from plane.bgtasks.event_outbox import dispatch_event, write_archive_event
 from plane.db.models import Cycle, UserFavorite, Issue, Label, User, Project
 from plane.utils.analytics_plot import burndown_plot
 
@@ -593,19 +594,41 @@ class CycleArchiveUnarchiveEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        cycle.archived_at = timezone.now()
-        cycle.save()
-        UserFavorite.objects.filter(
-            entity_type="cycle",
-            entity_identifier=cycle_id,
-            project_id=project_id,
-            workspace__slug=slug,
-        ).delete()
+        with transaction.atomic():
+            cycle.archived_at = timezone.now()
+            cycle.save()
+            UserFavorite.objects.filter(
+                entity_type="cycle",
+                entity_identifier=cycle_id,
+                project_id=project_id,
+                workspace__slug=slug,
+            ).delete()
+
+            event = write_archive_event(
+                model_name="cycle",
+                model_id=str(cycle.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=cycle.workspace_id,
+                project_id=cycle.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response({"archived_at": str(cycle.archived_at)}, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def delete(self, request, slug, project_id, cycle_id):
         cycle = Cycle.objects.get(pk=cycle_id, project_id=project_id, workspace__slug=slug)
-        cycle.archived_at = None
-        cycle.save()
+        with transaction.atomic():
+            cycle.archived_at = None
+            cycle.save()
+
+            event = write_archive_event(
+                model_name="cycle",
+                model_id=str(cycle.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=cycle.workspace_id,
+                project_id=cycle.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

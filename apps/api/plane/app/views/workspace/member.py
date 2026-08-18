@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import json
+
 # Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import Count, Q, OuterRef, Subquery, IntegerField
 from django.utils import timezone
 from django.db.models.functions import Coalesce
@@ -21,6 +25,7 @@ from plane.app.serializers import (
     WorkSpaceMemberSerializer,
 )
 from plane.app.views.base import BaseAPIView
+from plane.bgtasks.event_outbox import dispatch_event, write_model_event
 from plane.db.models import Project, ProjectMember, WorkspaceMember, DraftIssue
 from plane.utils.cache import invalidate_cache
 
@@ -88,10 +93,22 @@ class WorkSpaceMemberViewSet(BaseViewSet):
         if "role" in request.data and int(request.data.get("role")) == 5:
             ProjectMember.objects.filter(workspace__slug=slug, member_id=workspace_member.member_id).update(role=5)
 
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
         serializer = WorkSpaceMemberSerializer(workspace_member, data=request.data, partial=True)
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+
+                event = write_model_event(
+                    model_name="workspace_member",
+                    model_id=str(workspace_member.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=workspace_member.workspace_id,
+                )
+                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -140,13 +157,26 @@ class WorkSpaceMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Deactivate the users from the projects where the user is part of
-        _ = ProjectMember.objects.filter(
-            workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
-        ).update(is_active=False, updated_at=timezone.now())
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
 
-        workspace_member.is_active = False
-        workspace_member.save()
+        with transaction.atomic():
+            # Deactivate the users from the projects where the user is part of
+            _ = ProjectMember.objects.filter(
+                workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
+            ).update(is_active=False, updated_at=timezone.now())
+
+            workspace_member.is_active = False
+            workspace_member.save()
+
+            event = write_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @invalidate_cache(
@@ -194,14 +224,27 @@ class WorkSpaceMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # # Deactivate the users from the projects where the user is part of
-        _ = ProjectMember.objects.filter(
-            workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
-        ).update(is_active=False, updated_at=timezone.now())
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
 
-        # # Deactivate the user
-        workspace_member.is_active = False
-        workspace_member.save()
+        with transaction.atomic():
+            # # Deactivate the users from the projects where the user is part of
+            _ = ProjectMember.objects.filter(
+                workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
+            ).update(is_active=False, updated_at=timezone.now())
+
+            # # Deactivate the user
+            workspace_member.is_active = False
+            workspace_member.save()
+
+            event = write_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

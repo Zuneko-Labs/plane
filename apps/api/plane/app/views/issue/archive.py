@@ -8,6 +8,7 @@ import json
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import OuterRef, Q, Prefetch, Exists, Subquery, Count
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -23,6 +24,7 @@ from plane.app.serializers import (
     IssueSerializer,
     IssueDetailSerializer,
 )
+from plane.bgtasks.event_outbox import dispatch_event, write_archive_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
     Issue,
@@ -261,19 +263,30 @@ class IssueArchiveViewSet(BaseViewSet):
                 {"error": "Can only archive completed or cancelled state group issue"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        issue_activity.delay(
-            type="issue.activity.updated",
-            requested_data=json.dumps({"archived_at": str(timezone.now().date()), "automation": False}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue.id),
-            project_id=str(project_id),
-            current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
-        issue.archived_at = timezone.now().date()
-        issue.save()
+        with transaction.atomic():
+            issue_activity.delay(
+                type="issue.activity.updated",
+                requested_data=json.dumps({"archived_at": str(timezone.now().date()), "automation": False}),
+                actor_id=str(request.user.id),
+                issue_id=str(issue.id),
+                project_id=str(project_id),
+                current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+            issue.archived_at = timezone.now().date()
+            issue.save()
+
+            event = write_archive_event(
+                model_name="issue",
+                model_id=str(issue.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=issue.workspace_id,
+                project_id=issue.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response({"archived_at": str(issue.archived_at)}, status=status.HTTP_200_OK)
 
@@ -285,19 +298,30 @@ class IssueArchiveViewSet(BaseViewSet):
             archived_at__isnull=False,
             pk=pk,
         )
-        issue_activity.delay(
-            type="issue.activity.updated",
-            requested_data=json.dumps({"archived_at": None}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue.id),
-            project_id=str(project_id),
-            current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
-        issue.archived_at = None
-        issue.save()
+        with transaction.atomic():
+            issue_activity.delay(
+                type="issue.activity.updated",
+                requested_data=json.dumps({"archived_at": None}),
+                actor_id=str(request.user.id),
+                issue_id=str(issue.id),
+                project_id=str(project_id),
+                current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+            issue.archived_at = None
+            issue.save()
+
+            event = write_archive_event(
+                model_name="issue",
+                model_id=str(issue.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=issue.workspace_id,
+                project_id=issue.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -315,29 +339,48 @@ class BulkArchiveIssuesEndpoint(BaseAPIView):
         issues = Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk__in=issue_ids).select_related(
             "state"
         )
-        bulk_archive_issues = []
-        for issue in issues:
-            if issue.state.group not in ["completed", "cancelled"]:
-                return Response(
-                    {
-                        "error_code": ERROR_CODES["INVALID_ARCHIVE_STATE_GROUP"],
-                        "error_message": "INVALID_ARCHIVE_STATE_GROUP",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            bulk_archive_issues = []
+            event_ids = []
+            for issue in issues:
+                if issue.state.group not in ["completed", "cancelled"]:
+                    return Response(
+                        {
+                            "error_code": ERROR_CODES["INVALID_ARCHIVE_STATE_GROUP"],
+                            "error_message": "INVALID_ARCHIVE_STATE_GROUP",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                issue_activity.delay(
+                    type="issue.activity.updated",
+                    requested_data=json.dumps({"archived_at": str(timezone.now().date()), "automation": False}),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue.id),
+                    project_id=str(project_id),
+                    current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
                 )
-            issue_activity.delay(
-                type="issue.activity.updated",
-                requested_data=json.dumps({"archived_at": str(timezone.now().date()), "automation": False}),
-                actor_id=str(request.user.id),
-                issue_id=str(issue.id),
-                project_id=str(project_id),
-                current_instance=json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            issue.archived_at = timezone.now().date()
-            bulk_archive_issues.append(issue)
-        Issue.objects.bulk_update(bulk_archive_issues, ["archived_at"])
+                issue.archived_at = timezone.now().date()
+                bulk_archive_issues.append(issue)
+
+                # One event per issue — not one per request.
+                event = write_archive_event(
+                    model_name="issue",
+                    model_id=str(issue.id),
+                    archived=True,
+                    actor_id=request.user.id,
+                    workspace_id=issue.workspace_id,
+                    project_id=issue.project_id,
+                )
+                event_ids.append(str(event.id))
+            Issue.objects.bulk_update(bulk_archive_issues, ["archived_at"])
+
+            def _dispatch_events():
+                for event_id in event_ids:
+                    dispatch_event.delay(event_log_id=event_id)
+
+            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"archived_at": str(timezone.now().date())}, status=status.HTTP_200_OK)

@@ -3,10 +3,13 @@
 # See the LICENSE file for details.
 
 # Python imports
+import json
 from itertools import groupby
 from collections import defaultdict
 
 # Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.utils import IntegrityError
 
 # Third party imports
@@ -17,6 +20,7 @@ from rest_framework import status
 from .. import BaseViewSet, BaseAPIView
 from plane.app.serializers import StateSerializer
 from plane.app.permissions import ROLE, allow_permission
+from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
 from plane.db.models import State, Issue
 from plane.utils.cache import invalidate_cache
 
@@ -48,7 +52,20 @@ class StateViewSet(BaseViewSet):
         try:
             serializer = StateSerializer(data=request.data)
             if serializer.is_valid():
-                serializer.save(project_id=project_id)
+                with transaction.atomic():
+                    serializer.save(project_id=project_id)
+                    state = serializer.instance
+
+                    event = write_model_event(
+                        model_name="state",
+                        model_id=str(state.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=state.workspace_id,
+                        project_id=state.project_id,
+                    )
+                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError as e:
@@ -62,9 +79,22 @@ class StateViewSet(BaseViewSet):
     def partial_update(self, request, slug, project_id, pk):
         try:
             state = State.objects.get(pk=pk, project_id=project_id, workspace__slug=slug)
+            current_instance = json.dumps(StateSerializer(state).data, cls=DjangoJSONEncoder)
             serializer = StateSerializer(state, data=request.data, partial=True)
             if serializer.is_valid():
-                serializer.save()
+                with transaction.atomic():
+                    serializer.save()
+
+                    event = write_model_event(
+                        model_name="state",
+                        model_id=str(state.id),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        workspace_id=state.workspace_id,
+                        project_id=state.project_id,
+                    )
+                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError as e:
@@ -129,7 +159,17 @@ class StateViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        state.delete()
+        with transaction.atomic():
+            state.delete()
+
+            event = write_delete_event(
+                model_name="state",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=state.workspace_id,
+                project_id=state.project_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

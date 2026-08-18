@@ -26,7 +26,7 @@ from django.db.models import (
     Sum,
     FloatField,
 )
-from django.db import models
+from django.db import models, transaction
 from django.db.models.functions import Coalesce, Cast, Concat
 from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
@@ -57,6 +57,7 @@ from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.utils.host import base_host
 from plane.utils.cycle_transfer_issues import transfer_cycle_issues
 from .. import BaseAPIView, BaseViewSet
+from plane.bgtasks.event_outbox import dispatch_event, write_model_event
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.timezone_converter import convert_to_utc, user_timezone_converter
 
@@ -274,56 +275,71 @@ class CycleViewSet(BaseViewSet):
         ):
             serializer = CycleWriteSerializer(data=request.data, context={"project_id": project_id})
             if serializer.is_valid():
-                serializer.save(project_id=project_id, owned_by=request.user)
-                cycle = (
-                    self.get_queryset()
-                    .filter(pk=serializer.data["id"])
-                    .values(
-                        # necessary fields
-                        "id",
-                        "workspace_id",
-                        "project_id",
-                        # model fields
-                        "name",
-                        "description",
-                        "start_date",
-                        "end_date",
-                        "owned_by_id",
-                        "view_props",
-                        "sort_order",
-                        "external_source",
-                        "external_id",
-                        "progress_snapshot",
-                        "logo_props",
-                        "version",
-                        # meta fields
-                        "is_favorite",
-                        "total_issues",
-                        "completed_issues",
-                        "assignee_ids",
-                        "status",
-                        "created_by",
+                with transaction.atomic():
+                    serializer.save(project_id=project_id, owned_by=request.user)
+                    cycle = (
+                        self.get_queryset()
+                        .filter(pk=serializer.data["id"])
+                        .values(
+                            # necessary fields
+                            "id",
+                            "workspace_id",
+                            "project_id",
+                            # model fields
+                            "name",
+                            "description",
+                            "start_date",
+                            "end_date",
+                            "owned_by_id",
+                            "view_props",
+                            "sort_order",
+                            "external_source",
+                            "external_id",
+                            "progress_snapshot",
+                            "logo_props",
+                            "version",
+                            # meta fields
+                            "is_favorite",
+                            "total_issues",
+                            "completed_issues",
+                            "assignee_ids",
+                            "status",
+                            "created_by",
+                        )
+                        .first()
                     )
-                    .first()
-                )
 
-                # Fetch the project timezone
-                project = Project.objects.get(id=self.kwargs.get("project_id"))
-                project_timezone = project.timezone
+                    # Fetch the project timezone
+                    project = Project.objects.get(id=self.kwargs.get("project_id"))
+                    project_timezone = project.timezone
 
-                datetime_fields = ["start_date", "end_date"]
-                cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
+                    datetime_fields = ["start_date", "end_date"]
+                    cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
 
-                # Send the model activity
-                model_activity.delay(
-                    model_name="cycle",
-                    model_id=str(cycle["id"]),
-                    requested_data=request.data,
-                    current_instance=None,
-                    actor_id=request.user.id,
-                    slug=slug,
-                    origin=base_host(request=request, is_app=True),
-                )
+                    event = write_model_event(
+                        model_name="cycle",
+                        model_id=str(cycle["id"]),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=cycle["workspace_id"],
+                        project_id=cycle["project_id"],
+                    )
+
+                    # Send the model activity
+                    def _dispatch_model_activity():
+                        model_activity.delay(
+                            model_name="cycle",
+                            model_id=str(cycle["id"]),
+                            requested_data=request.data,
+                            current_instance=None,
+                            actor_id=request.user.id,
+                            slug=slug,
+                            origin=base_host(request=request, is_app=True),
+                        )
+                        dispatch_event.delay(event_log_id=str(event.id))
+
+                    transaction.on_commit(_dispatch_model_activity, robust=True)
                 return Response(cycle, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -358,51 +374,66 @@ class CycleViewSet(BaseViewSet):
 
         serializer = CycleWriteSerializer(cycle, data=request.data, partial=True, context={"project_id": project_id})
         if serializer.is_valid():
-            serializer.save()
-            cycle = queryset.values(
-                # necessary fields
-                "id",
-                "workspace_id",
-                "project_id",
-                # model fields
-                "name",
-                "description",
-                "start_date",
-                "end_date",
-                "owned_by_id",
-                "view_props",
-                "sort_order",
-                "external_source",
-                "external_id",
-                "progress_snapshot",
-                "logo_props",
-                "version",
-                # meta fields
-                "is_favorite",
-                "total_issues",
-                "completed_issues",
-                "assignee_ids",
-                "status",
-                "created_by",
-            ).first()
+            with transaction.atomic():
+                serializer.save()
+                cycle = queryset.values(
+                    # necessary fields
+                    "id",
+                    "workspace_id",
+                    "project_id",
+                    # model fields
+                    "name",
+                    "description",
+                    "start_date",
+                    "end_date",
+                    "owned_by_id",
+                    "view_props",
+                    "sort_order",
+                    "external_source",
+                    "external_id",
+                    "progress_snapshot",
+                    "logo_props",
+                    "version",
+                    # meta fields
+                    "is_favorite",
+                    "total_issues",
+                    "completed_issues",
+                    "assignee_ids",
+                    "status",
+                    "created_by",
+                ).first()
 
-            # Fetch the project timezone
-            project = Project.objects.get(id=self.kwargs.get("project_id"))
-            project_timezone = project.timezone
+                # Fetch the project timezone
+                project = Project.objects.get(id=self.kwargs.get("project_id"))
+                project_timezone = project.timezone
 
-            datetime_fields = ["start_date", "end_date"]
-            cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
+                datetime_fields = ["start_date", "end_date"]
+                cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="cycle",
-                model_id=str(cycle["id"]),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                event = write_model_event(
+                    model_name="cycle",
+                    model_id=str(cycle["id"]),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=cycle["workspace_id"],
+                    project_id=cycle["project_id"],
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="cycle",
+                        model_id=str(cycle["id"]),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+                    dispatch_event.delay(event_log_id=str(event.id))
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             return Response(cycle, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

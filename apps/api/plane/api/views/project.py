@@ -10,10 +10,12 @@ from django.db import IntegrityError, transaction
 from django.db.models import Exists, F, Func, OuterRef, Prefetch, Q, Subquery, Count
 from django.db.models.functions import Coalesce
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.core.serializers.json import DjangoJSONEncoder
 
 # Third party imports
 from rest_framework import status
+from rest_framework.exceptions import ParseError
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError
 from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
@@ -37,6 +39,7 @@ from plane.db.models import (
     IntakeIssue,
     ProjectPage,
 )
+from plane.bgtasks.event_outbox import dispatch_event, write_archive_event, write_delete_event, write_model_event
 from plane.bgtasks.webhook_task import model_activity, webhook_activity
 from plane.utils.exception_logger import log_exception
 from .base import BaseAPIView
@@ -174,10 +177,17 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
             workspace__slug=self.kwargs.get("slug"),
             is_active=True,
         ).values("sort_order")
+        projects = self.get_queryset().annotate(sort_order=Subquery(sort_order_query))
+
+        updated_at_gte = request.GET.get("updated_at__gte")
+        if updated_at_gte:
+            parsed = parse_datetime(updated_at_gte)
+            if parsed is None:
+                raise ParseError(f"Invalid updated_at__gte value: {updated_at_gte!r}")
+            projects = projects.filter(updated_at__gte=parsed)
+
         projects = (
-            self.get_queryset()
-            .annotate(sort_order=Subquery(sort_order_query))
-            .prefetch_related(
+            projects.prefetch_related(
                 Prefetch(
                     "project_projectmember",
                     queryset=ProjectMember.objects.filter(workspace__slug=slug, is_active=True).select_related(
@@ -270,6 +280,19 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
 
                     project = self.get_queryset().filter(pk=serializer.instance.id).first()
 
+                    # Outbox event, written in the same transaction as the
+                    # mutation above. The fast-path dispatch is registered
+                    # via on_commit below, alongside the existing webhook
+                    # activity dispatch.
+                    event = write_model_event(
+                        model_name="project",
+                        model_id=str(project.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=workspace.id,
+                    )
+
                     # Defer the activity-log task until the surrounding
                     # transaction commits, so it never fires on a rolled-back
                     # creation.
@@ -295,6 +318,7 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
                         )
+                        dispatch_event.delay(event_log_id=str(event.id))
 
                     transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -480,27 +504,45 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
             )
 
             if serializer.is_valid():
-                serializer.save()
-                if serializer.data["intake_view"]:
-                    intake = Intake.objects.filter(project=project, is_default=True).first()
-                    if not intake:
-                        Intake.objects.create(
-                            name=f"{project.name} Intake",
-                            project=project,
-                            is_default=True,
+                with transaction.atomic():
+                    serializer.save()
+                    if serializer.data["intake_view"]:
+                        intake = Intake.objects.filter(project=project, is_default=True).first()
+                        if not intake:
+                            Intake.objects.create(
+                                name=f"{project.name} Intake",
+                                project=project,
+                                is_default=True,
+                            )
+
+                    project = self.get_queryset().filter(pk=serializer.instance.id).first()
+
+                    # Outbox event, in the same transaction as the update
+                    # above. Dispatch is deferred to on_commit below, same
+                    # as the existing model_activity dispatch, so neither
+                    # fires on a rolled-back update.
+                    event = write_model_event(
+                        model_name="project",
+                        model_id=str(project.id),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        workspace_id=workspace.id,
+                    )
+
+                    def _dispatch_model_activity():
+                        model_activity.delay(
+                            model_name="project",
+                            model_id=str(project.id),
+                            requested_data=request.data,
+                            current_instance=current_instance,
+                            actor_id=request.user.id,
+                            slug=slug,
+                            origin=base_host(request=request, is_app=True),
                         )
+                        dispatch_event.delay(event_log_id=str(event.id))
 
-                project = self.get_queryset().filter(pk=serializer.instance.id).first()
-
-                model_activity.delay(
-                    model_name="project",
-                    model_id=str(project.id),
-                    requested_data=request.data,
-                    current_instance=current_instance,
-                    actor_id=request.user.id,
-                    slug=slug,
-                    origin=base_host(request=request, is_app=True),
-                )
+                    transaction.on_commit(_dispatch_model_activity, robust=True)
 
                 serializer = ProjectSerializer(project)
                 return Response(serializer.data, status=status.HTTP_200_OK)
@@ -537,22 +579,37 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
         Only admins can delete projects and the action cannot be undone.
         """
         project = Project.objects.get(pk=pk, workspace__slug=slug)
-        # Delete the user favorite cycle
-        UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
-        project.delete()
-        webhook_activity.delay(
-            event="project",
-            verb="deleted",
-            field=None,
-            old_value=None,
-            new_value=None,
-            actor_id=request.user.id,
-            slug=slug,
-            current_site=base_host(request=request, is_app=True),
-            event_id=project.id,
-            old_identifier=None,
-            new_identifier=None,
-        )
+        with transaction.atomic():
+            project_id = project.id
+            workspace_id = project.workspace_id
+            # Delete the user favorite cycle
+            UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
+            project.delete()
+
+            event = write_delete_event(
+                model_name="project",
+                entity_id=project_id,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+            )
+
+            def _dispatch_webhook_activity():
+                webhook_activity.delay(
+                    event="project",
+                    verb="deleted",
+                    field=None,
+                    old_value=None,
+                    new_value=None,
+                    actor_id=request.user.id,
+                    slug=slug,
+                    current_site=base_host(request=request, is_app=True),
+                    event_id=project_id,
+                    old_identifier=None,
+                    new_identifier=None,
+                )
+                dispatch_event.delay(event_log_id=str(event.id))
+
+            transaction.on_commit(_dispatch_webhook_activity, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -580,9 +637,19 @@ class ProjectArchiveUnarchiveAPIEndpoint(BaseAPIView):
         Archived projects remain accessible but are excluded from regular workflows.
         """
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
-        project.archived_at = timezone.now()
-        project.save()
-        UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
+        with transaction.atomic():
+            project.archived_at = timezone.now()
+            project.save()
+            UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
+
+            event = write_archive_event(
+                model_name="project",
+                model_id=str(project.id),
+                archived=True,
+                actor_id=request.user.id,
+                workspace_id=project.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @project_docs(
@@ -604,8 +671,18 @@ class ProjectArchiveUnarchiveAPIEndpoint(BaseAPIView):
         The project will reappear in active project lists and become fully functional.
         """
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
-        project.archived_at = None
-        project.save()
+        with transaction.atomic():
+            project.archived_at = None
+            project.save()
+
+            event = write_archive_event(
+                model_name="project",
+                model_id=str(project.id),
+                archived=False,
+                actor_id=request.user.id,
+                workspace_id=project.workspace_id,
+            )
+            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
