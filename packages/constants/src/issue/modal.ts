@@ -5,7 +5,7 @@
  */
 
 // plane imports
-import type { TIssue } from "@plane/types";
+import type { TIssue, TIssueRecurrence } from "@plane/types";
 
 export const DEFAULT_WORK_ITEM_FORM_VALUES: Partial<TIssue> = {
   project_id: "",
@@ -22,4 +22,10 @@ export const DEFAULT_WORK_ITEM_FORM_VALUES: Partial<TIssue> = {
   module_ids: null,
   start_date: null,
   target_date: null,
+};
+
+export const DEFAULT_RECURRENCE_VALUES: TIssueRecurrence = {
+  frequency: "weekly",
+  start_date: null,
+  times_per_month: 1,
 };

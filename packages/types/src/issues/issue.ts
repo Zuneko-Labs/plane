@@ -87,6 +87,24 @@ type IssueRelation = {
   sequence_id: number;
 };
 
+export type TIssueRecurrenceFrequency = "daily" | "weekly" | "monthly";
+
+export type TIssueRecurrence = {
+  frequency: TIssueRecurrenceFrequency;
+  start_date: string | null;
+  // "N times per month" for monthly (semi-monthly) recurrences; 1 = once.
+  times_per_month?: number;
+};
+
+// Shape returned by the recurrence endpoint for an existing work item.
+export type TIssueRecurrenceDetail = {
+  id: string;
+  frequency: TIssueRecurrenceFrequency;
+  start_date: string | null;
+  next_run_at: string | null;
+  is_active: boolean;
+};
+
 export type TIssue = TBaseIssue & {
   description_html?: string;
   is_subscribed?: boolean;
@@ -101,6 +119,8 @@ export type TIssue = TBaseIssue & {
   // sourceIssueId is used to store the original issue id when creating a copy of an issue. Used in cloning property values. It is not a part of the API response.
   sourceIssueId?: string;
   state__group?: TStateGroups | null;
+  // recurrence is a write-only payload sent on create when the "Recurring" toggle is on.
+  recurrence?: TIssueRecurrence | null;
 };
 
 export type TIssueMap = {

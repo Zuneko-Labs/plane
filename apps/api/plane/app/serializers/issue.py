@@ -79,6 +79,19 @@ class IssueProjectLiteSerializer(BaseSerializer):
 
 ##TODO: Find a better way to write this serializer
 ## Find a better approach to save manytomany?
+class RecurrenceSerializer(serializers.Serializer):
+    """Validate the recurrence rule sent alongside a create-issue request.
+
+    This is not a model serializer — the view uses the validated data to build
+    an ``IssueRecurrence`` row after the first occurrence has been created.
+    """
+
+    frequency = serializers.ChoiceField(choices=["daily", "weekly", "monthly"])
+    start_date = serializers.DateField(required=False, allow_null=True)
+    # "N times per month" for semi-monthly monthly recurrences (default once).
+    times_per_month = serializers.IntegerField(min_value=1, max_value=28, default=1, required=False)
+
+
 class IssueCreateSerializer(BaseSerializer):
     # ids
     state_id = serializers.PrimaryKeyRelatedField(

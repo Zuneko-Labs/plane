@@ -8,13 +8,14 @@ import type { FC } from "react";
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
+import { Repeat } from "lucide-react";
 import type { UseFormRegister } from "react-hook-form";
 import { useForm } from "react-hook-form";
 // plane imports
 import { useTranslation } from "@plane/i18n";
 import { PlusIcon } from "@plane/propel/icons";
 import { setPromiseToast } from "@plane/propel/toast";
-import type { IProject, TIssue, EIssueLayoutTypes } from "@plane/types";
+import type { IProject, TIssue, TIssueRecurrenceFrequency, EIssueLayoutTypes } from "@plane/types";
 import { cn, createIssuePayload } from "@plane/utils";
 // plane web imports
 import { QuickAddIssueFormRoot } from "@/plane-web/components/issues/quick-add";
@@ -70,6 +71,10 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   const { workspaceSlug, projectId } = useParams();
   // states
   const [isOpen, setIsOpen] = useState(isQuickAddOpen ?? false);
+  // "" = one-time (not recurring); otherwise the chosen frequency
+  const [recurringFrequency, setRecurringFrequency] = useState<TIssueRecurrenceFrequency | "">("");
+  // "N times per month" for monthly recurrences (semi-monthly)
+  const [recurringTimesPerMonth, setRecurringTimesPerMonth] = useState<number>(1);
   // form info
   const {
     reset,
@@ -86,14 +91,18 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   }, [isQuickAddOpen]);
 
   useEffect(() => {
-    if (!isOpen) reset({ ...defaultValues });
+    if (!isOpen) {
+      reset({ ...defaultValues });
+      setRecurringFrequency("");
+      setRecurringTimesPerMonth(1);
+    }
   }, [isOpen, reset]);
 
-  const handleIsOpen = (isOpen: boolean) => {
+  const handleIsOpen = (nextIsOpen: boolean) => {
     if (isQuickAddOpen !== undefined && setIsQuickAddOpen) {
-      setIsQuickAddOpen(isOpen);
+      setIsQuickAddOpen(nextIsOpen);
     } else {
-      setIsOpen(isOpen);
+      setIsOpen(nextIsOpen);
     }
   };
 
@@ -103,9 +112,22 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     reset({ ...defaultValues });
 
     const payload = createIssuePayload(projectId.toString(), {
-      ...(prePopulatedData ?? {}),
+      ...prePopulatedData,
       ...formData,
+      // attach a recurrence rule when a frequency was picked in the quick-add.
+      ...(recurringFrequency
+        ? {
+            recurrence: {
+              frequency: recurringFrequency,
+              start_date: null,
+              ...(recurringFrequency === "monthly" ? { times_per_month: recurringTimesPerMonth } : {}),
+            },
+          }
+        : {}),
     });
+
+    setRecurringFrequency("");
+    setRecurringTimesPerMonth(1);
 
     if (quickAddCallback) {
       const quickAddPromise = quickAddCallback(projectId.toString(), { ...payload });
@@ -144,18 +166,50 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
       )}
     >
       {isOpen ? (
-        <QuickAddIssueFormRoot
-          isOpen={isOpen}
-          layout={layout}
-          prePopulatedData={prePopulatedData}
-          projectId={projectId?.toString()}
-          hasError={errors && errors?.name && errors?.name?.message ? true : false}
-          setFocus={setFocus}
-          register={register}
-          onSubmit={handleSubmit(onSubmitHandler)}
-          onClose={() => handleIsOpen(false)}
-          isEpic={isEpic}
-        />
+        <>
+          <QuickAddIssueFormRoot
+            isOpen={isOpen}
+            layout={layout}
+            prePopulatedData={prePopulatedData}
+            projectId={projectId?.toString()}
+            hasError={!!(errors && errors?.name && errors?.name?.message)}
+            setFocus={setFocus}
+            register={register}
+            onSubmit={handleSubmit(onSubmitHandler)}
+            onClose={() => handleIsOpen(false)}
+            isEpic={isEpic}
+          />
+          {!isEpic && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 text-tertiary">
+              <Repeat className="size-3.5 shrink-0" />
+              <select
+                value={recurringFrequency}
+                onChange={(e) => setRecurringFrequency(e.target.value as TIssueRecurrenceFrequency | "")}
+                className="focus:ring-primary-100 rounded border-[0.5px] border-subtle bg-surface-1 px-1.5 py-0.5 text-caption-sm-regular focus:ring-1 focus:outline-none"
+                aria-label={t("recurring")}
+              >
+                <option value="">{t("recurrence_one_time")}</option>
+                <option value="daily">{t("frequency_daily")}</option>
+                <option value="weekly">{t("frequency_weekly")}</option>
+                <option value="monthly">{t("frequency_monthly")}</option>
+              </select>
+              {recurringFrequency === "monthly" && (
+                <>
+                  <input
+                    type="number"
+                    min={1}
+                    max={28}
+                    value={recurringTimesPerMonth}
+                    onChange={(e) => setRecurringTimesPerMonth(Math.min(28, Math.max(1, Number(e.target.value) || 1)))}
+                    className="focus:ring-primary-100 w-12 rounded border-[0.5px] border-subtle bg-surface-1 px-1.5 py-0.5 text-caption-sm-regular focus:ring-1 focus:outline-none"
+                    aria-label={t("times_per_month")}
+                  />
+                  <span className="text-caption-sm-regular">{t("times_per_month")}</span>
+                </>
+              )}
+            </div>
+          )}
+        </>
       ) : (
         <>
           {QuickAddButton && <QuickAddButton isEpic={isEpic} onClick={() => handleIsOpen(true)} />}

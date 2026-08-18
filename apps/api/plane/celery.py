@@ -60,6 +60,10 @@ app.conf.beat_schedule = {
         "task": "plane.bgtasks.issue_automation_task.archive_and_close_old_issues",
         "schedule": crontab(hour=1, minute=0),  # UTC 01:00
     },
+    "check-every-day-to-generate-recurring-issues": {
+        "task": "plane.bgtasks.recurring_issue_task.generate_recurring_issues",
+        "schedule": crontab(hour=1, minute=15),  # UTC 01:15
+    },
     "check-every-day-to-delete_exporter_history": {
         "task": "plane.bgtasks.exporter_expired_task.delete_old_s3_link",
         "schedule": crontab(hour=1, minute=30),  # UTC 01:30
