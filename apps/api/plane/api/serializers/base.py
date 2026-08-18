@@ -5,6 +5,10 @@
 # Third party imports
 from rest_framework import serializers
 
+from django.core.exceptions import ObjectDoesNotExist
+
+from plane.utils.exception_logger import log_exception
+
 
 class BaseSerializer(serializers.ModelSerializer):
     """
@@ -72,6 +76,12 @@ class BaseSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         response = super().to_representation(instance)
 
+        # Only expand fields explicitly requested by the caller via ?expand=.
+        # Expanding unconditionally causes N+1 queries on every response and
+        # breaks clients that expect UUID scalars where they requested none.
+        if not self.expand:
+            return response
+
         # Import all the expandable serializers
         from . import (
             IssueSerializer,
@@ -83,8 +93,7 @@ class BaseSerializer(serializers.ModelSerializer):
             EstimatePointSerializer,
         )
 
-        # Expansion mapper — every FK/M2M field named here is always
-        # expanded to its full object instead of just its id.
+        # Expansion mapper — maps field name → serializer class.
         expansion = {
             "user": UserLiteSerializer,
             "workspace": WorkspaceLiteSerializer,
@@ -103,12 +112,22 @@ class BaseSerializer(serializers.ModelSerializer):
             "estimate_point": EstimatePointSerializer,
         }
 
-        for field_name, expand_serializer in expansion.items():
+        for field_name in self.expand:
+            # Only expand fields that (a) are declared on this serializer,
+            # (b) are not write-only (write-only fields have no place in
+            # the response and the instance attribute may not be the
+            # representation the client expects), and (c) are in the map.
             if field_name not in self.fields:
+                continue
+            if self.fields[field_name].write_only:
+                continue
+            if field_name not in expansion:
+                response[field_name] = getattr(instance, f"{field_name}_id", None)
                 continue
             if not hasattr(instance, field_name):
                 continue
 
+            expand_serializer = expansion[field_name]
             value = getattr(instance, field_name)
             if value is None:
                 continue
@@ -120,7 +139,7 @@ class BaseSerializer(serializers.ModelSerializer):
                     response[field_name] = expand_serializer(value, many=True).data
                 else:
                     response[field_name] = expand_serializer(value).data
-            except Exception:
-                continue
+            except ObjectDoesNotExist as e:
+                log_exception(e)
 
         return response

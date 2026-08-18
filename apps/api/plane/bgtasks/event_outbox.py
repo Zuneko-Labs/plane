@@ -268,6 +268,71 @@ def write_archive_event(
     )
 
 
+def emit_model_event(
+    *,
+    model_name: str,
+    model_id: Union[str, UUID],
+    requested_data: Optional[Dict[str, Any]],
+    current_instance: Optional[Union[str, Dict[str, Any]]],
+    actor_id: Optional[UUID],
+    workspace_id: UUID,
+    project_id: Optional[UUID] = None,
+) -> None:
+    """
+    Convenience wrapper that combines ``write_model_event`` with the
+    ``transaction.on_commit`` dispatch in a single call.
+
+    Must be called inside an open transaction (same requirement as
+    ``write_model_event``). Replaces the recurring boilerplate:
+
+        event = write_model_event(...)
+        transaction.on_commit(
+            lambda: dispatch_event.delay(event_log_id=str(event.id)),
+            robust=True,
+        )
+
+    Using this helper means any future change to dispatch semantics
+    (retry policy, ``robust`` flag, claiming strategy) has a single
+    source of truth instead of being replicated across every call site.
+    """
+    event = write_model_event(
+        model_name=model_name,
+        model_id=model_id,
+        requested_data=requested_data,
+        current_instance=current_instance,
+        actor_id=actor_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    event_id = str(event.id)
+    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)
+
+
+def emit_delete_event(
+    *,
+    model_name: str,
+    entity_id: Union[str, UUID],
+    actor_id: Optional[UUID],
+    workspace_id: UUID,
+    project_id: Optional[UUID] = None,
+) -> None:
+    """
+    Convenience wrapper that combines ``write_delete_event`` with the
+    ``transaction.on_commit`` dispatch in a single call.
+
+    Must be called inside an open transaction.
+    """
+    event = write_delete_event(
+        model_name=model_name,
+        entity_id=entity_id,
+        actor_id=actor_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    event_id = str(event.id)
+    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)
+
+
 def _claim_event(event_id) -> bool:
     """Atomically mark one row dispatched, only if still pending. Returns
     whether this call was the one that claimed it."""

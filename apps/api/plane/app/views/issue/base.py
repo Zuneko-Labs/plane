@@ -42,7 +42,7 @@ from plane.app.serializers import (
     ProjectUserPropertySerializer,
     RecurrenceSerializer,
 )
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import dispatch_event, emit_delete_event, emit_model_event, write_delete_event, write_model_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
 from plane.bgtasks.recent_visited_task import recent_visited_task
@@ -854,14 +854,31 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
 
         total_issues = len(issues)
 
-        # First, delete all related cycle issues
-        CycleIssue.objects.filter(issue__in=issues).delete()
+        # Capture workspace_id before deletion while we still have the rows.
+        workspace_id = issues[0].workspace_id if total_issues else None
 
-        # Then, delete all related module issues
-        ModuleIssue.objects.filter(issue__in=issues).delete()
+        with transaction.atomic():
+            # First, delete all related cycle issues
+            CycleIssue.objects.filter(issue__in=issues).delete()
 
-        # Finally, delete the issues themselves
-        issues.delete()
+            # Then, delete all related module issues
+            ModuleIssue.objects.filter(issue__in=issues).delete()
+
+            # Finally, delete the issues themselves
+            issues.delete()
+
+            # Emit one outbox delete event per issue so consumers learn of
+            # each deletion individually — matches the per-entity contract
+            # of every other mutation path.
+            if workspace_id:
+                for issue_id in issue_ids:
+                    emit_delete_event(
+                        model_name="issue",
+                        entity_id=issue_id,
+                        actor_id=request.user.id,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                    )
 
         return Response(
             {"message": f"{total_issues} issues were deleted"},
@@ -1249,8 +1266,27 @@ class IssueBulkUpdateDateEndpoint(BaseAPIView):
                 issue.target_date = target_date
                 issues_to_update.append(issue)
 
-        # Bulk update issues
-        Issue.objects.bulk_update(issues_to_update, ["start_date", "target_date"])
+        # Bulk update issues and emit one outbox event per modified issue.
+        # Wrap in a transaction so the DB writes and the outbox rows are
+        # atomic — a rollback won't leave orphaned event rows.
+        with transaction.atomic():
+            Issue.objects.bulk_update(issues_to_update, ["start_date", "target_date"])
+
+            for issue in issues_to_update:
+                requested = {}
+                if issue.start_date is not None:
+                    requested["start_date"] = str(issue.start_date)
+                if issue.target_date is not None:
+                    requested["target_date"] = str(issue.target_date)
+                emit_model_event(
+                    model_name="issue",
+                    model_id=str(issue.id),
+                    requested_data=requested,
+                    current_instance=None,  # diff already sent via issue_activity; snapshot only
+                    actor_id=request.user.id,
+                    workspace_id=issue.workspace_id,
+                    project_id=issue.project_id,
+                )
 
         return Response({"message": "Issues updated successfully"}, status=status.HTTP_200_OK)
 

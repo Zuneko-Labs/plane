@@ -6,7 +6,7 @@
 from django.utils import timezone
 from django.apps import apps
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.db.models.fields.related import OneToOneRel
 
 
@@ -132,62 +132,90 @@ def hard_delete():
         Estimate,
         EstimatePoint,
     )
+    from plane.bgtasks.event_outbox import write_delete_event, dispatch_event
 
     days = settings.HARD_DELETE_AFTER_DAYS
-    # check delete workspace
-    _ = Workspace.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    cutoff = timezone.now() - timezone.timedelta(days=days)
 
-    # check delete project
-    _ = Project.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    # Helper: collect IDs, write outbox rows atomically with the hard-delete,
+    # then schedule dispatch outside the transaction.  The relay sweeper is
+    # the correctness backstop if dispatch never fires.
+    def _hard_delete_with_events(model, workspace_fk="workspace_id", project_fk="project_id"):
+        """
+        Hard-delete all rows past the retention window and emit one
+        ``<entity>.deleted`` outbox event per row so consumers don't diverge.
 
-    # check delete cycle
-    _ = Cycle.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+        ``workspace_fk`` / ``project_fk`` are the field names on the model
+        that hold workspace/project context; pass ``None`` for models that
+        have no such field.
+        """
+        qs = model.all_objects.filter(deleted_at__lt=cutoff)
+        # Collect the fields we need before the rows disappear.
+        extra = {}
+        if workspace_fk:
+            extra["workspace_id"] = workspace_fk
+        if project_fk:
+            extra["project_id"] = project_fk
 
-    # check delete module
-    _ = Module.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+        rows = list(qs.values("id", *[v for v in extra.values()]))
 
-    # check delete issue
-    _ = Issue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+        event_ids = []
+        with transaction.atomic():
+            qs.delete()
+            entity_type = model._meta.model_name
+            for row in rows:
+                event = write_delete_event(
+                    model_name=entity_type,
+                    entity_id=row["id"],
+                    actor_id=None,  # system-initiated
+                    workspace_id=row.get(workspace_fk) if workspace_fk else None,
+                    project_id=row.get(project_fk) if project_fk else None,
+                )
+                event_ids.append(str(event.id))
 
-    # check delete page
-    _ = Page.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+        # Schedule dispatch outside the transaction — the rows are committed.
+        for eid in event_ids:
+            dispatch_event.delay(event_log_id=eid)
 
-    # check delete view
-    _ = IssueView.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    # Entity types that have meaningful consumers in the events API.
+    # Order mirrors the original cascade order (parents before children where
+    # Django would cascade, but hard_delete already handles each table
+    # independently so order mainly matters for FK constraint safety).
+    _hard_delete_with_events(Workspace, workspace_fk="id", project_fk=None)
+    _hard_delete_with_events(Project, workspace_fk="workspace_id", project_fk="id")
+    _hard_delete_with_events(Cycle)
+    _hard_delete_with_events(Module)
+    _hard_delete_with_events(Issue)
+    _hard_delete_with_events(Page)
+    _hard_delete_with_events(IssueView)
+    _hard_delete_with_events(Label)
+    _hard_delete_with_events(State)
 
-    # check delete label
-    _ = Label.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+    # Activity / join tables — emit events but they typically have no
+    # direct webhook subscribers; still important for pull-API consumers.
+    _hard_delete_with_events(IssueActivity)
+    _hard_delete_with_events(IssueComment)
+    _hard_delete_with_events(IssueLink)
+    _hard_delete_with_events(IssueReaction)
+    _hard_delete_with_events(UserFavorite, project_fk=None)
+    _hard_delete_with_events(ModuleIssue)
+    _hard_delete_with_events(CycleIssue)
+    _hard_delete_with_events(Estimate)
+    _hard_delete_with_events(EstimatePoint)
 
-    # check delete state
-    _ = State.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = IssueActivity.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = IssueComment.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = IssueLink.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = IssueReaction.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = UserFavorite.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = ModuleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = CycleIssue.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = Estimate.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    _ = EstimatePoint.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
-
-    # at last, check for every thing which ever is left and delete it
-    # Get all Django models
+    # Catch-all for any remaining models with deleted_at that weren't
+    # covered explicitly above.  These get a plain hard-delete without
+    # outbox emission (no webhook subscribers; unknown workspace context).
     all_models = apps.get_models()
-
-    # Iterate through all models
+    handled = {
+        Workspace, Project, Cycle, Module, Issue, Page, IssueView, Label,
+        State, IssueActivity, IssueComment, IssueLink, IssueReaction,
+        UserFavorite, ModuleIssue, CycleIssue, Estimate, EstimatePoint,
+    }
     for model in all_models:
-        # Check if the model has a 'deleted_at' field
+        if model in handled:
+            continue
         if hasattr(model, "deleted_at"):
-            # Get all instances where 'deleted_at' is greater than 30 days ago
-            _ = model.all_objects.filter(deleted_at__lt=timezone.now() - timezone.timedelta(days=days)).delete()
+            model.all_objects.filter(deleted_at__lt=cutoff).delete()
 
     return

@@ -200,6 +200,16 @@ class ModuleSerializer(BaseSerializer):
             "deleted_at",
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # `members` is write_only — return the list of member UUIDs from the
+        # through-table instead of leaking write-only field internals or
+        # accidentally triggering the base-class expansion loop.
+        data["members"] = list(
+            ModuleMember.objects.filter(module=instance).values_list("member_id", flat=True)
+        )
+        return data
+
 
 
 class ModuleIssueSerializer(BaseSerializer):
