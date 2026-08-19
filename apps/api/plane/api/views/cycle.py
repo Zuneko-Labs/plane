@@ -51,11 +51,10 @@ from plane.utils.order_queryset import ISSUE_ORDER_BY_ALLOWLIST, sanitize_order_
 from plane.utils.host import base_host
 from .base import BaseAPIView
 from plane.bgtasks.event_outbox import (
-    dispatch_event,
-    write_archive_event,
-    write_delete_event,
-    write_event,
-    write_model_event,
+    emit_archive_event,
+    emit_delete_event,
+    emit_event,
+    emit_model_event,
 )
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.openapi.decorators import cycle_docs
@@ -345,7 +344,7 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
                     serializer.save(project_id=project_id)
                     cycle = Cycle.objects.get(pk=serializer.instance.id)
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="cycle",
                         model_id=str(cycle.id),
                         requested_data=request.data,
@@ -366,7 +365,6 @@ class CycleListCreateAPIEndpoint(BaseAPIView):
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
                         )
-                        dispatch_event.delay(event_log_id=str(event.id))
 
                     transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -568,7 +566,7 @@ class CycleDetailAPIEndpoint(BaseAPIView):
                 serializer.save()
                 cycle = Cycle.objects.get(pk=serializer.instance.id)
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="cycle",
                     model_id=str(cycle.id),
                     requested_data=request.data,
@@ -589,7 +587,6 @@ class CycleDetailAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -650,14 +647,13 @@ class CycleDetailAPIEndpoint(BaseAPIView):
             # Delete the user favorite cycle
             UserFavorite.objects.filter(entity_type="cycle", entity_identifier=pk, project_id=project_id).delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="cycle",
                 entity_id=pk,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -830,7 +826,7 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace__slug=slug,
             ).delete()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="cycle",
                 model_id=str(cycle.id),
                 archived=True,
@@ -838,7 +834,6 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace_id=cycle.workspace_id,
                 project_id=cycle.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @cycle_docs(
@@ -861,7 +856,7 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
             cycle.archived_at = None
             cycle.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="cycle",
                 model_id=str(cycle.id),
                 archived=False,
@@ -869,7 +864,6 @@ class CycleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace_id=cycle.workspace_id,
                 project_id=cycle.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1086,12 +1080,11 @@ class CycleIssueListCreateAPIEndpoint(BaseAPIView):
             )
 
             # Outbox: one event per added/moved cycle-issue link, not one per request.
-            event_ids = []
             for record in created_records:
                 if record.id is None:
                     # Skipped by ignore_conflicts — no row was actually created.
                     continue
-                event = write_event(
+                emit_event(
                     workspace_id=cycle.workspace_id,
                     project_id=project_id,
                     entity_type="cycle_issue",
@@ -1100,9 +1093,8 @@ class CycleIssueListCreateAPIEndpoint(BaseAPIView):
                     actor_id=request.user.id,
                     data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
                 )
-                event_ids.append(str(event.id))
             for record, activity in zip(updated_records, update_cycle_issue_activity):
-                event = write_event(
+                emit_event(
                     workspace_id=cycle.workspace_id,
                     project_id=project_id,
                     entity_type="cycle_issue",
@@ -1112,13 +1104,6 @@ class CycleIssueListCreateAPIEndpoint(BaseAPIView):
                     data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
                     changes={"cycle_id": {"old": activity["old_cycle_id"], "new": activity["new_cycle_id"]}},
                 )
-                event_ids.append(str(event.id))
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         # Return all Cycle Issues
         return Response(
@@ -1232,7 +1217,7 @@ class CycleIssueDetailAPIEndpoint(BaseAPIView):
                 epoch=int(timezone.now().timestamp()),
             )
 
-            event = write_event(
+            emit_event(
                 workspace_id=workspace_id,
                 project_id=project_id,
                 entity_type="cycle_issue",
@@ -1240,7 +1225,6 @@ class CycleIssueDetailAPIEndpoint(BaseAPIView):
                 event_type="cycle_issue.deleted",
                 actor_id=request.user.id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

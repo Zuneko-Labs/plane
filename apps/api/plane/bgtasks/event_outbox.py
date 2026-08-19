@@ -172,6 +172,37 @@ def write_event(
     )
 
 
+def emit_event(
+    *,
+    workspace_id: UUID,
+    entity_type: str,
+    entity_id: UUID,
+    event_type: str,
+    project_id: Optional[UUID] = None,
+    actor_id: Optional[UUID] = None,
+    data: Optional[Dict[str, Any]] = None,
+    changes: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Convenience wrapper that combines ``write_event`` with the
+    ``transaction.on_commit`` dispatch in a single call.
+
+    Must be called inside an open transaction.
+    """
+    event = write_event(
+        workspace_id=workspace_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        event_type=event_type,
+        project_id=project_id,
+        actor_id=actor_id,
+        data=data,
+        changes=changes,
+    )
+    event_id = str(event.id)
+    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)
+
+
 def write_model_event(
     *,
     model_name: str,
@@ -343,6 +374,33 @@ def emit_delete_event(
     event = write_delete_event(
         model_name=model_name,
         entity_id=entity_id,
+        actor_id=actor_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    event_id = str(event.id)
+    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)
+
+
+def emit_archive_event(
+    *,
+    model_name: str,
+    model_id: Union[str, UUID],
+    archived: bool,
+    actor_id: Optional[UUID],
+    workspace_id: UUID,
+    project_id: Optional[UUID] = None,
+) -> None:
+    """
+    Convenience wrapper that combines ``write_archive_event`` with the
+    ``transaction.on_commit`` dispatch in a single call.
+
+    Must be called inside an open transaction.
+    """
+    event = write_archive_event(
+        model_name=model_name,
+        model_id=model_id,
+        archived=archived,
         actor_id=actor_id,
         workspace_id=workspace_id,
         project_id=project_id,
