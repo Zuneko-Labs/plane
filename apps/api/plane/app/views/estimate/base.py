@@ -18,7 +18,7 @@ from rest_framework import status
 # Module imports
 from ..base import BaseViewSet, BaseAPIView
 from plane.app.permissions import ProjectEntityPermission, allow_permission, ROLE
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event, emit_delete_event
 from plane.db.models import Project, Estimate, EstimatePoint, Issue
 from plane.app.serializers import (
     EstimateSerializer,
@@ -102,32 +102,26 @@ class BulkEstimatePointEndpoint(BaseViewSet):
                 ignore_conflicts=True,
             )
 
-            events = [
-                write_model_event(
-                    model_name="estimate",
-                    model_id=str(estimate.id),
-                    requested_data=request.data,
-                    current_instance=None,
-                    actor_id=request.user.id,
-                    workspace_id=estimate.workspace_id,
-                    project_id=estimate.project_id,
-                )
-            ] + [
-                write_model_event(
-                    model_name="estimate_point",
-                    model_id=str(point.id),
-                    requested_data=None,
-                    current_instance=None,
-                    actor_id=request.user.id,
-                    workspace_id=point.workspace_id,
-                    project_id=point.project_id,
-                )
-                for point in estimate_points
-                if point.id is not None  # skipped by ignore_conflicts — no row was actually created
-            ]
-            transaction.on_commit(
-                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
+            emit_model_event(
+                model_name="estimate",
+                model_id=str(estimate.id),
+                requested_data=request.data,
+                current_instance=None,
+                actor_id=request.user.id,
+                workspace_id=estimate.workspace_id,
+                project_id=estimate.project_id,
             )
+            for point in estimate_points:
+                if point.id is not None:  # skipped by ignore_conflicts — no row was actually created
+                    emit_model_event(
+                        model_name="estimate_point",
+                        model_id=str(point.id),
+                        requested_data=None,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=point.workspace_id,
+                        project_id=point.project_id,
+                    )
 
         serializer = EstimateReadSerializer(estimate)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -179,18 +173,17 @@ class BulkEstimatePointEndpoint(BaseViewSet):
 
             EstimatePoint.objects.bulk_update(updated_estimate_points, ["key", "value"], batch_size=10)
 
-            events = [
-                write_model_event(
-                    model_name="estimate",
-                    model_id=str(estimate.id),
-                    requested_data=request.data,
-                    current_instance=current_instance,
-                    actor_id=request.user.id,
-                    workspace_id=estimate.workspace_id,
-                    project_id=estimate.project_id,
-                )
-            ] + [
-                write_model_event(
+            emit_model_event(
+                model_name="estimate",
+                model_id=str(estimate.id),
+                requested_data=request.data,
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=estimate.workspace_id,
+                project_id=estimate.project_id,
+            )
+            for point in updated_estimate_points:
+                emit_model_event(
                     model_name="estimate_point",
                     model_id=str(point.id),
                     requested_data={"key": point.key, "value": point.value},
@@ -199,11 +192,6 @@ class BulkEstimatePointEndpoint(BaseViewSet):
                     workspace_id=point.workspace_id,
                     project_id=point.project_id,
                 )
-                for point in updated_estimate_points
-            ]
-            transaction.on_commit(
-                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
-            )
 
         estimate_serializer = EstimateReadSerializer(estimate)
         return Response(estimate_serializer.data, status=status.HTTP_200_OK)
@@ -214,14 +202,13 @@ class BulkEstimatePointEndpoint(BaseViewSet):
         with transaction.atomic():
             estimate.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="estimate",
                 entity_id=str(estimate_id),
                 actor_id=request.user.id,
                 workspace_id=estimate.workspace_id,
                 project_id=estimate.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -252,7 +239,7 @@ class EstimatePointEndpoint(BaseViewSet):
                 estimate_id=estimate_id, project_id=project_id, key=key, value=value
             )
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="estimate_point",
                 model_id=str(estimate_point.id),
                 requested_data=request.data,
@@ -261,7 +248,6 @@ class EstimatePointEndpoint(BaseViewSet):
                 workspace_id=estimate_point.workspace_id,
                 project_id=estimate_point.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         serializer = EstimatePointSerializer(estimate_point).data
         return Response(serializer, status=status.HTTP_200_OK)
 
@@ -281,7 +267,7 @@ class EstimatePointEndpoint(BaseViewSet):
         with transaction.atomic():
             serializer.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="estimate_point",
                 model_id=str(estimate_point.id),
                 requested_data=request.data,
@@ -290,7 +276,6 @@ class EstimatePointEndpoint(BaseViewSet):
                 workspace_id=estimate_point.workspace_id,
                 project_id=estimate_point.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -366,14 +351,13 @@ class EstimatePointEndpoint(BaseViewSet):
             old_point_project_id = old_estimate_point.project_id
             old_estimate_point.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="estimate_point",
                 entity_id=str(old_point_id),
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=old_point_project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response(
             EstimatePointSerializer(updated_estimate_points, many=True).data,
