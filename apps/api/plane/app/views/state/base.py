@@ -20,7 +20,7 @@ from rest_framework import status
 from .. import BaseViewSet, BaseAPIView
 from plane.app.serializers import StateSerializer
 from plane.app.permissions import ROLE, allow_permission
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import State, Issue
 from plane.utils.cache import invalidate_cache
 
@@ -56,7 +56,7 @@ class StateViewSet(BaseViewSet):
                     serializer.save(project_id=project_id)
                     state = serializer.instance
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="state",
                         model_id=str(state.id),
                         requested_data=request.data,
@@ -65,7 +65,6 @@ class StateViewSet(BaseViewSet):
                         workspace_id=state.workspace_id,
                         project_id=state.project_id,
                     )
-                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError as e:
@@ -85,7 +84,7 @@ class StateViewSet(BaseViewSet):
                 with transaction.atomic():
                     serializer.save()
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="state",
                         model_id=str(state.id),
                         requested_data=request.data,
@@ -94,7 +93,6 @@ class StateViewSet(BaseViewSet):
                         workspace_id=state.workspace_id,
                         project_id=state.project_id,
                     )
-                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError as e:
@@ -162,14 +160,13 @@ class StateViewSet(BaseViewSet):
         with transaction.atomic():
             state.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="state",
                 entity_id=str(pk),
                 actor_id=request.user.id,
                 workspace_id=state.workspace_id,
                 project_id=state.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

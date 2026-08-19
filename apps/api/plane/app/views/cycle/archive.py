@@ -30,7 +30,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from plane.app.permissions import allow_permission, ROLE
-from plane.bgtasks.event_outbox import dispatch_event, write_archive_event
+from plane.bgtasks.event_outbox import emit_archive_event
 from plane.db.models import Cycle, UserFavorite, Issue, Label, User, Project
 from plane.utils.analytics_plot import burndown_plot
 
@@ -604,7 +604,7 @@ class CycleArchiveUnarchiveEndpoint(BaseAPIView):
                 workspace__slug=slug,
             ).delete()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="cycle",
                 model_id=str(cycle.id),
                 archived=True,
@@ -612,7 +612,6 @@ class CycleArchiveUnarchiveEndpoint(BaseAPIView):
                 workspace_id=cycle.workspace_id,
                 project_id=cycle.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response({"archived_at": str(cycle.archived_at)}, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -622,7 +621,7 @@ class CycleArchiveUnarchiveEndpoint(BaseAPIView):
             cycle.archived_at = None
             cycle.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="cycle",
                 model_id=str(cycle.id),
                 archived=False,
@@ -630,5 +629,4 @@ class CycleArchiveUnarchiveEndpoint(BaseAPIView):
                 workspace_id=cycle.workspace_id,
                 project_id=cycle.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -57,7 +57,7 @@ from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.utils.host import base_host
 from plane.utils.cycle_transfer_issues import transfer_cycle_issues
 from .. import BaseAPIView, BaseViewSet
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.timezone_converter import convert_to_utc, user_timezone_converter
 
@@ -316,7 +316,7 @@ class CycleViewSet(BaseViewSet):
                     datetime_fields = ["start_date", "end_date"]
                     cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="cycle",
                         model_id=str(cycle["id"]),
                         requested_data=request.data,
@@ -337,7 +337,6 @@ class CycleViewSet(BaseViewSet):
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
                         )
-                        dispatch_event.delay(event_log_id=str(event.id))
 
                     transaction.on_commit(_dispatch_model_activity, robust=True)
                 return Response(cycle, status=status.HTTP_201_CREATED)
@@ -410,7 +409,7 @@ class CycleViewSet(BaseViewSet):
                 datetime_fields = ["start_date", "end_date"]
                 cycle = user_timezone_converter(cycle, datetime_fields, project_timezone)
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="cycle",
                     model_id=str(cycle["id"]),
                     requested_data=request.data,
@@ -431,7 +430,6 @@ class CycleViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 

@@ -16,7 +16,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 # Module imports
 from plane.api.serializers import StateSerializer
 from plane.app.permissions import ProjectEntityPermission
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import Issue, State
 from .base import BaseAPIView
 from plane.utils.openapi import (
@@ -118,7 +118,7 @@ class StateListCreateAPIEndpoint(BaseAPIView):
                     serializer.save(project_id=project_id)
                     state = serializer.instance
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="state",
                         model_id=str(state.id),
                         requested_data=request.data,
@@ -127,7 +127,6 @@ class StateListCreateAPIEndpoint(BaseAPIView):
                         workspace_id=state.workspace_id,
                         project_id=state.project_id,
                     )
-                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError:
@@ -265,14 +264,13 @@ class StateDetailAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             state.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="state",
                 entity_id=str(state_id),
                 actor_id=request.user.id,
                 workspace_id=state.workspace_id,
                 project_id=state.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @state_docs(
@@ -326,7 +324,7 @@ class StateDetailAPIEndpoint(BaseAPIView):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="state",
                     model_id=str(state.id),
                     requested_data=request.data,
@@ -335,6 +333,5 @@ class StateDetailAPIEndpoint(BaseAPIView):
                     workspace_id=state.workspace_id,
                     project_id=state.project_id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
