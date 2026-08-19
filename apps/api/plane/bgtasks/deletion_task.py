@@ -132,14 +132,13 @@ def hard_delete():
         Estimate,
         EstimatePoint,
     )
-    from plane.bgtasks.event_outbox import write_delete_event, dispatch_event
+    from plane.bgtasks.event_outbox import emit_delete_event
 
     days = settings.HARD_DELETE_AFTER_DAYS
     cutoff = timezone.now() - timezone.timedelta(days=days)
 
-    # Helper: collect IDs, write outbox rows atomically with the hard-delete,
-    # then schedule dispatch outside the transaction.  The relay sweeper is
-    # the correctness backstop if dispatch never fires.
+    # Helper: emit delete events for hard-deleted rows.
+    # emit_delete_event writes outbox rows and schedules dispatch atomically.
     def _hard_delete_with_events(model, workspace_fk="workspace_id", project_fk="project_id"):
         """
         Hard-delete all rows past the retention window and emit one
@@ -159,23 +158,17 @@ def hard_delete():
 
         rows = list(qs.values("id", *[v for v in extra.values()]))
 
-        event_ids = []
         with transaction.atomic():
             qs.delete()
             entity_type = model._meta.model_name
             for row in rows:
-                event = write_delete_event(
+                emit_delete_event(
                     model_name=entity_type,
                     entity_id=row["id"],
                     actor_id=None,  # system-initiated
                     workspace_id=row.get(workspace_fk) if workspace_fk else None,
                     project_id=row.get(project_fk) if project_fk else None,
                 )
-                event_ids.append(str(event.id))
-
-        # Schedule dispatch outside the transaction — the rows are committed.
-        for eid in event_ids:
-            dispatch_event.delay(event_log_id=eid)
 
     # Entity types that have meaningful consumers in the events API.
     # Order mirrors the original cascade order (parents before children where
