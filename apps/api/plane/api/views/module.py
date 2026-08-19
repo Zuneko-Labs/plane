@@ -44,11 +44,10 @@ from plane.db.models import (
 
 from .base import BaseAPIView
 from plane.bgtasks.event_outbox import (
-    dispatch_event,
-    write_archive_event,
-    write_delete_event,
-    write_event,
-    write_model_event,
+    emit_archive_event,
+    emit_delete_event,
+    emit_event,
+    emit_model_event,
 )
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.host import base_host
@@ -239,7 +238,7 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
                 serializer.save()
                 module = Module.objects.get(pk=serializer.instance.id)
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="module",
                     model_id=str(module.id),
                     requested_data=request.data,
@@ -260,7 +259,6 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -506,7 +504,7 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="module",
                     model_id=str(module.id),
                     requested_data=request.data,
@@ -527,7 +525,6 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -618,14 +615,13 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             # Delete the user favorite module
             UserFavorite.objects.filter(entity_type="module", entity_identifier=pk, project_id=project_id).delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="module",
                 entity_id=pk,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -827,12 +823,11 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             )
 
             # Outbox: one event per added/moved module-issue link, not one per request.
-            event_ids = []
             for record in record_to_create:
                 if record.id is None:
                     # Skipped by ignore_conflicts — no row was actually created.
                     continue
-                event = write_event(
+                emit_event(
                     workspace_id=module.workspace_id,
                     project_id=project_id,
                     entity_type="module_issue",
@@ -841,9 +836,8 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
                     actor_id=request.user.id,
                     data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
                 )
-                event_ids.append(str(event.id))
             for record, activity in zip(records_to_update, update_module_issue_activity):
-                event = write_event(
+                emit_event(
                     workspace_id=module.workspace_id,
                     project_id=project_id,
                     entity_type="module_issue",
@@ -853,13 +847,6 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
                     data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
                     changes={"module_id": {"old": activity["old_module_id"], "new": activity["new_module_id"]}},
                 )
-                event_ids.append(str(event.id))
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response(
             ModuleIssueSerializer(self.get_queryset(), many=True).data,
@@ -1023,15 +1010,13 @@ class ModuleIssueDetailAPIEndpoint(BaseAPIView):
                 epoch=int(timezone.now().timestamp()),
             )
 
-            event = write_event(
+            emit_delete_event(
+                model_name="module_issue",
+                entity_id=module_issue_id,
+                actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
-                entity_type="module_issue",
-                entity_id=module_issue_id,
-                event_type="module_issue.deleted",
-                actor_id=request.user.id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1200,7 +1185,7 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace__slug=slug,
             ).delete()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="module",
                 model_id=str(module.id),
                 archived=True,
@@ -1208,7 +1193,6 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace_id=module.workspace_id,
                 project_id=module.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @module_docs(
@@ -1234,7 +1218,7 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
             module.archived_at = None
             module.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="module",
                 model_id=str(module.id),
                 archived=False,
@@ -1242,5 +1226,4 @@ class ModuleArchiveUnarchiveAPIEndpoint(BaseAPIView):
                 workspace_id=module.workspace_id,
                 project_id=module.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
