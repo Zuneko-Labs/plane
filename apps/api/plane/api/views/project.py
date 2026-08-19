@@ -39,7 +39,7 @@ from plane.db.models import (
     IntakeIssue,
     ProjectPage,
 )
-from plane.bgtasks.event_outbox import dispatch_event, write_archive_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_archive_event, emit_delete_event, emit_model_event
 from plane.bgtasks.webhook_task import model_activity, webhook_activity
 from plane.utils.exception_logger import log_exception
 from .base import BaseAPIView
@@ -284,7 +284,7 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
                     # mutation above. The fast-path dispatch is registered
                     # via on_commit below, alongside the existing webhook
                     # activity dispatch.
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="project",
                         model_id=str(project.id),
                         requested_data=request.data,
@@ -318,7 +318,6 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
                         )
-                        dispatch_event.delay(event_log_id=str(event.id))
 
                     transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -521,7 +520,7 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
                     # above. Dispatch is deferred to on_commit below, same
                     # as the existing model_activity dispatch, so neither
                     # fires on a rolled-back update.
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="project",
                         model_id=str(project.id),
                         requested_data=request.data,
@@ -540,7 +539,6 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
                         )
-                        dispatch_event.delay(event_log_id=str(event.id))
 
                     transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -586,7 +584,7 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
             UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
             project.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="project",
                 entity_id=project_id,
                 actor_id=request.user.id,
@@ -607,7 +605,6 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
                     old_identifier=None,
                     new_identifier=None,
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_webhook_activity, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -642,14 +639,13 @@ class ProjectArchiveUnarchiveAPIEndpoint(BaseAPIView):
             project.save()
             UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="project",
                 model_id=str(project.id),
                 archived=True,
                 actor_id=request.user.id,
                 workspace_id=project.workspace_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @project_docs(
@@ -675,14 +671,13 @@ class ProjectArchiveUnarchiveAPIEndpoint(BaseAPIView):
             project.archived_at = None
             project.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="project",
                 model_id=str(project.id),
                 archived=False,
                 actor_id=request.user.id,
                 workspace_id=project.workspace_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
