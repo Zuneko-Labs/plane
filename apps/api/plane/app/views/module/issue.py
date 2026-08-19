@@ -20,7 +20,7 @@ from rest_framework.response import Response
 
 from plane.app.permissions import allow_permission, ROLE
 from plane.app.serializers import ModuleIssueSerializer
-from plane.bgtasks.event_outbox import dispatch_event, write_event
+from plane.bgtasks.event_outbox import emit_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
     Issue,
@@ -256,12 +256,11 @@ class ModuleIssueViewSet(BaseViewSet):
             ]
 
             # Outbox: one event per module-issue link, not one per request.
-            event_ids = []
             for record in created_records:
                 if record.id is None:
                     # Skipped by ignore_conflicts — no row was actually created.
                     continue
-                event = write_event(
+                emit_event(
                     workspace_id=project.workspace_id,
                     project_id=project_id,
                     entity_type="module_issue",
@@ -270,13 +269,6 @@ class ModuleIssueViewSet(BaseViewSet):
                     actor_id=request.user.id,
                     data={"id": str(record.id), "module_id": str(module_id), "issue_id": str(record.issue_id)},
                 )
-                event_ids.append(str(event.id))
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
@@ -288,8 +280,6 @@ class ModuleIssueViewSet(BaseViewSet):
         project = Project.objects.get(pk=project_id)
 
         with transaction.atomic():
-            event_ids = []
-
             if modules:
                 created_records = ModuleIssue.objects.bulk_create(
                     [
@@ -325,7 +315,7 @@ class ModuleIssueViewSet(BaseViewSet):
                     if record.id is None:
                         # Skipped by ignore_conflicts — no row was actually created.
                         continue
-                    event = write_event(
+                    emit_event(
                         workspace_id=project.workspace_id,
                         project_id=project_id,
                         entity_type="module_issue",
@@ -334,7 +324,6 @@ class ModuleIssueViewSet(BaseViewSet):
                         actor_id=request.user.id,
                         data={"id": str(record.id), "module_id": str(record.module_id), "issue_id": str(issue_id)},
                     )
-                    event_ids.append(str(event.id))
 
             for module_id in removed_modules:
                 module_issue = ModuleIssue.objects.filter(
@@ -360,7 +349,7 @@ class ModuleIssueViewSet(BaseViewSet):
                 module_issue.delete()
 
                 if existing is not None:
-                    event = write_event(
+                    emit_event(
                         workspace_id=existing.workspace_id,
                         project_id=project_id,
                         entity_type="module_issue",
@@ -368,13 +357,6 @@ class ModuleIssueViewSet(BaseViewSet):
                         event_type="module_issue.deleted",
                         actor_id=request.user.id,
                     )
-                    event_ids.append(str(event.id))
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
@@ -402,7 +384,7 @@ class ModuleIssueViewSet(BaseViewSet):
             module_issue.delete()
 
             if existing is not None:
-                event = write_event(
+                emit_event(
                     workspace_id=existing.workspace_id,
                     project_id=project_id,
                     entity_type="module_issue",
@@ -410,5 +392,4 @@ class ModuleIssueViewSet(BaseViewSet):
                     event_type="module_issue.deleted",
                     actor_id=request.user.id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -62,7 +62,7 @@ from plane.db.models import (
 )
 from plane.utils.analytics_plot import burndown_plot
 from plane.utils.timezone_converter import user_timezone_converter
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.bgtasks.webhook_task import model_activity
 from .. import BaseAPIView, BaseViewSet
 from plane.bgtasks.recent_visited_task import recent_visited_task
@@ -338,7 +338,7 @@ class ModuleViewSet(BaseViewSet):
                     )
                 ).first()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="module",
                     model_id=str(module["id"]),
                     requested_data=request.data,
@@ -359,7 +359,6 @@ class ModuleViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -723,7 +722,7 @@ class ModuleViewSet(BaseViewSet):
                     "updated_at",
                 ).first()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="module",
                     model_id=str(module["id"]),
                     requested_data=request.data,
@@ -744,7 +743,6 @@ class ModuleViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
