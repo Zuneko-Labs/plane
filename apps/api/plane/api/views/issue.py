@@ -89,7 +89,13 @@ from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import (
+    dispatch_event,
+    emit_delete_event,
+    emit_model_event,
+    write_delete_event,
+    write_model_event,
+)
 from plane.bgtasks.webhook_task import model_activity
 from plane.app.permissions import ROLE
 from plane.utils.openapi import (
@@ -498,7 +504,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     origin=base_host(request=request, is_app=True),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue",
                     model_id=str(serializer.data["id"]),
                     requested_data=request.data,
@@ -519,7 +525,6 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -675,7 +680,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                             origin=base_host(request=request, is_app=True),
                         )
 
-                        event = write_model_event(
+                        emit_model_event(
                             model_name="issue",
                             model_id=str(issue.id),
                             requested_data=request.data,
@@ -696,7 +701,6 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                                 slug=slug,
                                 origin=base_host(request=request, is_app=True),
                             )
-                            dispatch_event.delay(event_log_id=str(event.id))
 
                         transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -752,7 +756,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                             origin=base_host(request=request, is_app=True),
                         )
 
-                        event = write_model_event(
+                        emit_model_event(
                             model_name="issue",
                             model_id=str(serializer.data["id"]),
                             requested_data=request.data,
@@ -773,7 +777,6 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                                 slug=slug,
                                 origin=base_host(request=request, is_app=True),
                             )
-                            dispatch_event.delay(event_log_id=str(event.id))
 
                         transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -856,7 +859,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                     origin=base_host(request=request, is_app=True),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue",
                     model_id=str(pk),
                     requested_data=request.data,
@@ -877,7 +880,6 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -931,14 +933,13 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 epoch=int(timezone.now().timestamp()),
             )
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue",
                 entity_id=pk,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1020,7 +1021,7 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
                     serializer.save(project_id=project_id)
                     label = Label.objects.get(pk=serializer.instance.id)
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="label",
                         model_id=str(label.id),
                         requested_data=request.data,
@@ -1029,7 +1030,6 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
                         workspace_id=label.workspace_id,
                         project_id=label.project_id,
                     )
-                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 serializer = LabelSerializer(label)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1166,7 +1166,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
                 serializer.save()
                 label = Label.objects.get(pk=serializer.instance.id)
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="label",
                     model_id=str(label.id),
                     requested_data=request.data,
@@ -1175,7 +1175,6 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
                     workspace_id=label.workspace_id,
                     project_id=label.project_id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             serializer = LabelSerializer(label)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1201,14 +1200,13 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
         with transaction.atomic():
             label.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="label",
                 entity_id=str(pk),
                 actor_id=request.user.id,
                 workspace_id=label.workspace_id,
                 project_id=label.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1304,7 +1302,7 @@ class IssueLinkListCreateAPIEndpoint(BaseAPIView):
                 link.created_by_id = request.data.get("created_by", request.user.id)
                 link.save(update_fields=["created_by"])
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_link",
                     model_id=str(link.id),
                     requested_data=request.data,
@@ -1324,7 +1322,6 @@ class IssueLinkListCreateAPIEndpoint(BaseAPIView):
                         current_instance=None,
                         epoch=int(timezone.now().timestamp()),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_link_created, robust=True)
             serializer = IssueLinkSerializer(link)
@@ -1430,7 +1427,7 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_link",
                     model_id=str(issue_link.id),
                     requested_data=request.data,
@@ -1451,7 +1448,6 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
                         current_instance=current_instance,
                         epoch=int(timezone.now().timestamp()),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_link_updated, robust=True)
             serializer = IssueLinkSerializer(issue_link)
@@ -1481,7 +1477,7 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             issue_link.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_link",
                 entity_id=str(pk),
                 actor_id=request.user.id,
@@ -1499,7 +1495,6 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
                     current_instance=current_instance,
                     epoch=int(timezone.now().timestamp()),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_link_deleted, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -1646,7 +1641,7 @@ class IssueCommentListCreateAPIEndpoint(BaseAPIView):
                     epoch=int(timezone.now().timestamp()),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_comment",
                     model_id=str(serializer.instance.id),
                     requested_data=request.data,
@@ -1667,7 +1662,6 @@ class IssueCommentListCreateAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -1801,7 +1795,7 @@ class IssueCommentDetailAPIEndpoint(BaseAPIView):
                     epoch=int(timezone.now().timestamp()),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_comment",
                     model_id=str(pk),
                     requested_data=request.data,
@@ -1822,7 +1816,6 @@ class IssueCommentDetailAPIEndpoint(BaseAPIView):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -2239,7 +2232,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             issue_attachment.save()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_attachment",
                 entity_id=str(pk),
                 actor_id=request.user.id,
@@ -2259,7 +2252,6 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
@@ -2396,7 +2388,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
             with transaction.atomic():
                 issue_attachment.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_attachment",
                     model_id=str(issue_attachment.id),
                     requested_data=request.data,
@@ -2418,7 +2410,6 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
                         notification=True,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_attachment_created, robust=True)
 
@@ -2760,8 +2751,8 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
             # One event per relation row, mirroring BulkArchiveIssuesEndpoint's
             # one-event-per-issue treatment — a bulk mutation must not collapse
             # into a single event covering N rows.
-            events = [
-                write_model_event(
+            for relation in created_relations:
+                emit_model_event(
                     model_name="issue_relation",
                     model_id=str(relation.id),
                     requested_data=request.data,
@@ -2770,8 +2761,6 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
                     workspace_id=relation.workspace_id,
                     project_id=relation.project_id,
                 )
-                for relation in created_relations
-            ]
 
             def _dispatch_relations_created():
                 issue_activity.delay(
@@ -2785,8 +2774,6 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                for event in events:
-                    dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_relations_created, robust=True)
 
