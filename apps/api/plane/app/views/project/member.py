@@ -22,7 +22,7 @@ from plane.app.serializers import (
 
 from plane.app.permissions import WorkspaceUserPermission
 
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.db.models import Project, ProjectMember, ProjectUserProperty, WorkspaceMember
 from plane.bgtasks.project_add_user_email_task import project_add_user_email
 from plane.utils.host import base_host
@@ -148,8 +148,8 @@ class ProjectMemberViewSet(BaseViewSet):
                 member_id__in=[member.get("member_id") for member in members],
             )
 
-            events = [
-                write_model_event(
+            for project_member in project_members:
+                emit_model_event(
                     model_name="project_member",
                     model_id=str(project_member.id),
                     requested_data=request.data,
@@ -158,8 +158,6 @@ class ProjectMemberViewSet(BaseViewSet):
                     workspace_id=project_member.workspace_id,
                     project_id=project_member.project_id,
                 )
-                for project_member in project_members
-            ]
 
             def _dispatch_members_added():
                 for project_member in project_members:
@@ -168,8 +166,6 @@ class ProjectMemberViewSet(BaseViewSet):
                         project_member.id,
                         request.user.id,
                     )
-                for event in events:
-                    dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_members_added, robust=True)
 
@@ -312,7 +308,7 @@ class ProjectMemberViewSet(BaseViewSet):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="project_member",
                     model_id=str(project_member.id),
                     requested_data=request.data,
@@ -321,7 +317,6 @@ class ProjectMemberViewSet(BaseViewSet):
                     workspace_id=project_member.workspace_id,
                     project_id=project_member.project_id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -359,7 +354,7 @@ class ProjectMemberViewSet(BaseViewSet):
         with transaction.atomic():
             project_member.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="project_member",
                 model_id=str(project_member.id),
                 requested_data={"is_active": False},
@@ -368,7 +363,6 @@ class ProjectMemberViewSet(BaseViewSet):
                 workspace_id=project_member.workspace_id,
                 project_id=project_member.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
@@ -400,7 +394,7 @@ class ProjectMemberViewSet(BaseViewSet):
         with transaction.atomic():
             project_member.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="project_member",
                 model_id=str(project_member.id),
                 requested_data={"is_active": False},
@@ -409,7 +403,6 @@ class ProjectMemberViewSet(BaseViewSet):
                 workspace_id=project_member.workspace_id,
                 project_id=project_member.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
