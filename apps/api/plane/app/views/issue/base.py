@@ -517,6 +517,7 @@ class IssueViewSet(BaseViewSet):
                     actor_id=request.user.id,
                     workspace_id=project.workspace_id,
                     project_id=project.id,
+                    instance=serializer.instance,
                 )
 
                 # Send the model activity
@@ -760,6 +761,7 @@ class IssueViewSet(BaseViewSet):
                         actor_id=request.user.id,
                         workspace_id=issue.workspace_id,
                         project_id=issue.project_id,
+                        instance=issue,
                     )
 
                     def _dispatch_model_activity():

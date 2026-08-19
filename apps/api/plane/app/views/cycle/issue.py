@@ -251,7 +251,22 @@ class CycleIssueViewSet(BaseViewSet):
                 )
             )
             existing_issues = [str(cycle_issue.issue_id) for cycle_issue in cycle_issues]
-            new_issues = list(set(issues) - set(existing_issues))
+
+            # Issues already in *this* cycle: not covered by the `~Q(cycle_id=cycle_id)`
+            # query above (that only tracks issues to move from another cycle), so
+            # without this they'd survive into `new_issues` below and bulk_create
+            # would attempt a duplicate (issue, cycle) insert — violating the unique
+            # constraint and crashing the whole request. Treat them as a no-op.
+            already_in_cycle = set(
+                str(i)
+                for i in CycleIssue.objects.filter(
+                    cycle_id=cycle_id,
+                    issue_id__in=issues,
+                    workspace__slug=slug,
+                    project_id=project_id,
+                ).values_list("issue_id", flat=True)
+            )
+            new_issues = list(set(issues) - set(existing_issues) - already_in_cycle)
 
             # Scope to workspace+project to prevent cross-tenant IDOR
             new_issues = list(

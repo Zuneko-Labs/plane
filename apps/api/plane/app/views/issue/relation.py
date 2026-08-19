@@ -229,26 +229,50 @@ class IssueRelationViewSet(BaseViewSet):
         )
 
         with transaction.atomic():
+            new_pairs = [
+                (
+                    (issue if relation_type in ["blocking", "start_after", "finish_after"] else issue_id),
+                    (issue_id if relation_type in ["blocking", "start_after", "finish_after"] else issue),
+                )
+                for issue in issues
+            ]
+            # bulk_create's `id` is set client-side (UUIDField default) before
+            # insert, so it's populated on every object regardless of whether
+            # ignore_conflicts actually skipped the row — checking `id is not
+            # None` can't tell created rows from conflict-skipped ones. Instead,
+            # snapshot which (issue, related_issue) pairs already existed before
+            # the insert, so anything not in that set afterwards is genuinely new.
+            existing_pairs = set(
+                IssueRelation.objects.filter(
+                    project_id=project_id,
+                    deleted_at__isnull=True,
+                    issue_id__in=[pair[0] for pair in new_pairs],
+                    related_issue_id__in=[pair[1] for pair in new_pairs],
+                ).values_list("issue_id", "related_issue_id")
+            )
+
             issue_relation = IssueRelation.objects.bulk_create(
                 [
                     IssueRelation(
-                        issue_id=(
-                            issue if relation_type in ["blocking", "start_after", "finish_after"] else issue_id
-                        ),
-                        related_issue_id=(
-                            issue_id if relation_type in ["blocking", "start_after", "finish_after"] else issue
-                        ),
+                        issue_id=issue_id_,
+                        related_issue_id=related_issue_id_,
                         relation_type=(get_actual_relation(relation_type)),
                         project_id=project_id,
                         workspace_id=project.workspace_id,
                         created_by=request.user,
                         updated_by=request.user,
                     )
-                    for issue in issues
+                    for issue_id_, related_issue_id_ in new_pairs
                 ],
                 batch_size=10,
                 ignore_conflicts=True,
             )
+
+            created_relations = [
+                relation
+                for relation in issue_relation
+                if (relation.issue_id, relation.related_issue_id) not in existing_pairs
+            ]
 
             events = [
                 write_model_event(
@@ -260,7 +284,7 @@ class IssueRelationViewSet(BaseViewSet):
                     workspace_id=relation.workspace_id,
                     project_id=relation.project_id,
                 )
-                for relation in issue_relation
+                for relation in created_relations
             ]
 
             def _dispatch_relations_created():

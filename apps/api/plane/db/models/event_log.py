@@ -41,6 +41,16 @@ class EventLog(BaseModel):
     # NULL means "outbox pending" — this is the relay's work queue.
     dispatched_at = models.DateTimeField(null=True, blank=True)
 
+    # NULL means "webhook fan-out not yet confirmed" — set only once
+    # ``_fanout_webhooks`` has run to completion for this row, whether or
+    # not it actually had any active webhooks to send. Deliberately separate
+    # from `dispatched_at`: that field is the pull-API's gap-free cursor
+    # claim and must never be reassigned once a consumer could have polled
+    # past it, whereas webhook delivery is retryable — the relay's sweep
+    # uses this field, not `dispatched_at`, to find fan-outs to redo after a
+    # failure (see event_outbox.relay_events).
+    webhook_dispatched_at = models.DateTimeField(null=True, blank=True)
+
     workspace = models.ForeignKey("db.Workspace", on_delete=models.CASCADE, related_name="event_logs")
     # NULL for workspace-scoped events (e.g. WorkspaceMember changes).
     project = models.ForeignKey(
@@ -91,6 +101,14 @@ class EventLog(BaseModel):
                 fields=["dispatched_at"],
                 name="event_log_pending_idx",
                 condition=models.Q(dispatched_at__isnull=True),
+            ),
+            # The relay's webhook-fanout retry sweep: claimed rows whose
+            # fan-out was never confirmed. Partial for the same reason —
+            # stays tiny, covering only the in-flight/failed backlog.
+            models.Index(
+                fields=["webhook_dispatched_at"],
+                name="event_log_webhook_retry_idx",
+                condition=models.Q(dispatched_at__isnull=False, webhook_dispatched_at__isnull=True),
             ),
         ]
 

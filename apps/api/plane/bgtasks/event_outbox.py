@@ -44,7 +44,7 @@ from plane.api.serializers import (
     StateSerializer,
 )
 from plane.app.serializers import WorkSpaceMemberSerializer
-from plane.bgtasks.webhook_task import get_model_data, webhook_send_task
+from plane.bgtasks.webhook_task import SERIALIZER_MAPPER, get_model_data, webhook_send_task
 from plane.db.models import (
     Estimate,
     EstimatePoint,
@@ -112,17 +112,28 @@ _LOCAL_MODEL_MAPPER = {
 }
 
 
-def _get_model_data(model_name: str, model_id: Union[str, UUID]) -> Dict[str, Any]:
+def _get_model_data(
+    model_name: str, model_id: Union[str, UUID], instance: Optional[Any] = None
+) -> Dict[str, Any]:
     """
     Serialize a model instance for an event_log snapshot. Checks the Phase 9
     local mapping first; falls back to webhook_task's mapper for the entity
     types wired there since Phase 4-6.
+
+    If the caller already has the instance in hand (e.g. it just saved it for
+    its own HTTP response), pass it via ``instance`` to skip the extra SELECT
+    this would otherwise issue to re-fetch the row.
     """
     serializer_class = _LOCAL_SERIALIZER_MAPPER.get(model_name)
     model = _LOCAL_MODEL_MAPPER.get(model_name)
     if serializer_class is None or model is None:
+        if instance is not None:
+            serializer_class = SERIALIZER_MAPPER.get(model_name)
+            if serializer_class is not None:
+                return serializer_class(instance).data
         return get_model_data(event=model_name, event_id=model_id)
-    instance = model.objects.get(pk=model_id)
+    if instance is None:
+        instance = model.objects.get(pk=model_id)
     return serializer_class(instance).data
 
 
@@ -170,6 +181,7 @@ def write_model_event(
     actor_id: Optional[UUID],
     workspace_id: UUID,
     project_id: Optional[UUID] = None,
+    instance: Optional[Any] = None,
 ) -> EventLog:
     """
     A near drop-in parallel to the existing ``model_activity.delay(...)``
@@ -180,6 +192,10 @@ def write_model_event(
     sends. Called alongside the existing ``model_activity.delay(...)``, not
     instead of it; that call still drives today's per-field webhook path
     unchanged.
+
+    ``instance``: pass the already-fetched/saved model instance when the
+    caller has one (e.g. straight out of ``serializer.save()``) to avoid a
+    duplicate SELECT + re-serialization of the row it just wrote.
     """
     event_type = f"{model_name}.{'created' if current_instance is None else 'updated'}"
 
@@ -194,7 +210,7 @@ def write_model_event(
         changes = diff or None
 
     try:
-        data = _get_model_data(model_name, model_id)
+        data = _get_model_data(model_name, model_id, instance=instance)
         # DRF serializer output can contain UUID/datetime objects a plain
         # JSONField write can't encode on its own — normalize the same way
         # webhook_task.py already does before it ever leaves Python.
@@ -277,6 +293,7 @@ def emit_model_event(
     actor_id: Optional[UUID],
     workspace_id: UUID,
     project_id: Optional[UUID] = None,
+    instance: Optional[Any] = None,
 ) -> None:
     """
     Convenience wrapper that combines ``write_model_event`` with the
@@ -303,6 +320,7 @@ def emit_model_event(
         actor_id=actor_id,
         workspace_id=workspace_id,
         project_id=project_id,
+        instance=instance,
     )
     event_id = str(event.id)
     transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)
@@ -334,8 +352,17 @@ def emit_delete_event(
 
 
 def _claim_event(event_id) -> bool:
-    """Atomically mark one row dispatched, only if still pending. Returns
-    whether this call was the one that claimed it."""
+    """Atomically mark one row dispatched (i.e. assign its pull-API cursor
+    ``dispatch_seq``), only if still pending. Returns whether this call was
+    the one that claimed it.
+
+    This is the *pull-API* claim, not a "webhook delivery done" marker — once
+    ``dispatch_seq`` is assigned it is a gap-free, commit-ordered cursor that
+    consumers may already have polled past, so it is never reassigned or
+    undone. Webhook fan-out completion is tracked separately by
+    ``webhook_dispatched_at`` (see ``_mark_webhook_dispatched``) precisely so
+    a fan-out failure never has to touch this claim.
+    """
     with connection.cursor() as cur:
         cur.execute(
             """
@@ -348,7 +375,43 @@ def _claim_event(event_id) -> bool:
         return cur.rowcount > 0
 
 
-def _fanout_webhooks(event: EventLog) -> None:
+def _mark_webhook_dispatched(event: EventLog) -> None:
+    """Record that webhook fan-out for this event ran to completion (whether
+    or not it actually had any webhooks to send) so the relay's retry sweep
+    (see ``relay_events``) knows not to pick it up again."""
+    EventLog.objects.filter(id=event.id).update(webhook_dispatched_at=timezone.now())
+
+
+def _prefetch_webhooks(events) -> Dict[Any, list]:
+    """
+    Batch-fetch the active webhooks for a set of events, keyed by
+    ``(workspace_id, filter_field)``, so a whole batch issues one query per
+    distinct (workspace, entity-type) pair instead of one query per event.
+    """
+    needed = set()
+    for event in events:
+        filter_field = _WEBHOOK_FILTER_FIELD.get(event.entity_type)
+        if filter_field is not None:
+            needed.add((event.workspace_id, filter_field))
+
+    cache = {}
+    for workspace_id, filter_field in needed:
+        cache[(workspace_id, filter_field)] = list(
+            Webhook.objects.filter(workspace_id=workspace_id, is_active=True, **{filter_field: True})
+        )
+    return cache
+
+
+def _fanout_webhooks(event: EventLog, webhooks: Optional[list] = None) -> None:
+    """
+    Send ``event`` to every active webhook subscribed to its entity type.
+
+    ``webhooks`` lets a batch caller (``relay_events``) pass in a
+    pre-fetched, per-(workspace, entity-type) webhook list instead of this
+    function issuing its own query — avoids an N+1 query per event when
+    fanning out a whole batch. Callers that only have one event (the
+    ``dispatch_event`` fast path) can omit it and this fetches its own.
+    """
     filter_field = _WEBHOOK_FILTER_FIELD.get(event.entity_type)
     if filter_field is None:
         return
@@ -356,7 +419,8 @@ def _fanout_webhooks(event: EventLog) -> None:
     verb = event.event_type.rsplit(".", 1)[-1]
     current_site = settings.APP_BASE_URL or settings.WEB_URL
 
-    webhooks = Webhook.objects.filter(workspace_id=event.workspace_id, is_active=True, **{filter_field: True})
+    if webhooks is None:
+        webhooks = Webhook.objects.filter(workspace_id=event.workspace_id, is_active=True, **{filter_field: True})
     for webhook in webhooks:
         webhook_send_task.delay(
             webhook_id=str(webhook.id),
@@ -371,17 +435,33 @@ def _fanout_webhooks(event: EventLog) -> None:
         )
 
 
-@shared_task
-def dispatch_event(event_log_id: str) -> None:
-    """The on_commit fast path for a single, already-committed event."""
+@shared_task(bind=True, max_retries=5, retry_backoff=30, retry_backoff_max=600, retry_jitter=True)
+def dispatch_event(self, event_log_id: str) -> None:
+    """
+    The on_commit fast path for a single, already-committed event.
+
+    Claiming (assigning ``dispatch_seq``) and confirming webhook fan-out are
+    tracked separately, so a fan-out failure never loses the event: this
+    task retries fan-out on its own (Celery retry, bounded), and even if
+    every retry is exhausted, ``relay_events`` will still pick the event up
+    later via its ``webhook_dispatched_at IS NULL`` sweep — the row was
+    never re-claimed, only the fan-out step is redone.
+    """
     try:
-        if not _claim_event(event_log_id):
-            # The relay already claimed it first — nothing to do.
-            return
         event = EventLog.objects.select_related("workspace").get(id=event_log_id)
+        if event.dispatched_at is None:
+            if not _claim_event(event_log_id):
+                # The relay already claimed it first — nothing to do.
+                return
+        elif event.webhook_dispatched_at is not None:
+            # Already confirmed delivered (e.g. a previous retry succeeded
+            # but the task result never made it back to the broker).
+            return
         _fanout_webhooks(event)
+        _mark_webhook_dispatched(event)
     except Exception as e:
         log_exception(e)
+        raise self.retry(exc=e)
 
 
 @shared_task
@@ -394,6 +474,12 @@ def relay_events(batch_size: int = 500) -> None:
     to the fan-out loop after. That's fine — a claimed row's `dispatched_at`
     is already set and committed by the time fan-out runs, so an overlapping
     sweep has nothing left to claim there.
+
+    A second pass below retries webhook fan-out for rows that were already
+    claimed (by this sweep, the fast path, or a previous sweep) but never
+    got a confirmed fan-out — e.g. ``dispatch_event`` exhausted its retries,
+    or a worker died mid-fanout. That pass never re-claims anything; it only
+    redoes ``_fanout_webhooks`` and stamps ``webhook_dispatched_at``.
     """
     claimed_ids = []
     with transaction.atomic():
@@ -412,15 +498,43 @@ def relay_events(batch_size: int = 500) -> None:
             if _claim_event(event_id):
                 claimed_ids.append(event_id)
 
-    if not claimed_ids:
+    if claimed_ids:
+        events_by_id = EventLog.objects.filter(id__in=claimed_ids).select_related("workspace").in_bulk()
+        webhook_cache = _prefetch_webhooks(events_by_id.values())
+        for event_id in claimed_ids:
+            event = events_by_id.get(event_id)
+            if event is None:
+                continue
+            try:
+                filter_field = _WEBHOOK_FILTER_FIELD.get(event.entity_type)
+                webhooks = webhook_cache.get((event.workspace_id, filter_field)) if filter_field else []
+                _fanout_webhooks(event, webhooks=webhooks)
+                _mark_webhook_dispatched(event)
+            except Exception as e:
+                log_exception(e)
+
+    # Retry sweep: rows already claimed (pull-API cursor assigned) whose
+    # webhook fan-out never got confirmed. Excludes this sweep's own
+    # first-pass rows — they were just handled above.
+    retry_ids = list(
+        EventLog.objects.filter(dispatched_at__isnull=False, webhook_dispatched_at__isnull=True)
+        .exclude(id__in=claimed_ids)
+        .order_by("sequence")
+        .values_list("id", flat=True)[:batch_size]
+    )
+    if not retry_ids:
         return
 
-    events_by_id = EventLog.objects.filter(id__in=claimed_ids).select_related("workspace").in_bulk()
-    for event_id in claimed_ids:
-        event = events_by_id.get(event_id)
+    retry_events_by_id = EventLog.objects.filter(id__in=retry_ids).select_related("workspace").in_bulk()
+    retry_webhook_cache = _prefetch_webhooks(retry_events_by_id.values())
+    for event_id in retry_ids:
+        event = retry_events_by_id.get(event_id)
         if event is None:
             continue
         try:
-            _fanout_webhooks(event)
+            filter_field = _WEBHOOK_FILTER_FIELD.get(event.entity_type)
+            webhooks = retry_webhook_cache.get((event.workspace_id, filter_field)) if filter_field else []
+            _fanout_webhooks(event, webhooks=webhooks)
+            _mark_webhook_dispatched(event)
         except Exception as e:
             log_exception(e)

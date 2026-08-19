@@ -243,9 +243,35 @@ class TestDispatchEventFastPath:
         assert kwargs["dispatch_seq"] == event.dispatch_seq
 
     @patch("plane.bgtasks.event_outbox.webhook_send_task")
-    def test_does_not_redispatch_a_row_already_claimed(self, mock_webhook_send):
-        # Simulates the relay having already claimed this row first —
-        # dispatch_event must be a no-op, not a second delivery.
+    def test_does_not_redispatch_a_row_already_confirmed_delivered(self, mock_webhook_send):
+        # Simulates a row already claimed *and* whose webhook fan-out already
+        # ran to completion — dispatch_event must be a no-op, not a second
+        # delivery.
+        workspace = WorkspaceFactory()
+        Webhook.objects.create(workspace=workspace, url="https://example.com/hook", project=True)
+
+        event = write_event(
+            workspace_id=workspace.id,
+            entity_type="project",
+            entity_id=workspace.id,
+            event_type="project.created",
+        )
+        EventLog.objects.filter(id=event.id).update(
+            dispatch_seq=1, dispatched_at=event.occurred_at, webhook_dispatched_at=event.occurred_at
+        )
+
+        dispatch_event.run(event_log_id=str(event.id))
+
+        mock_webhook_send.delay.assert_not_called()
+
+    @patch("plane.bgtasks.event_outbox.webhook_send_task")
+    def test_retries_fanout_for_a_row_claimed_but_never_confirmed(self, mock_webhook_send):
+        # A row can be claimed (dispatch_seq assigned, e.g. by a previous
+        # attempt or the relay) without its webhook fan-out ever having been
+        # confirmed — e.g. the process died between the claim and the fanout
+        # call. dispatch_event must still redo the fanout: the claim
+        # (dispatch_seq) is a separate, immutable pull-API cursor, and only
+        # `webhook_dispatched_at` means "no more webhook work needed here."
         workspace = WorkspaceFactory()
         Webhook.objects.create(workspace=workspace, url="https://example.com/hook", project=True)
 
@@ -259,7 +285,9 @@ class TestDispatchEventFastPath:
 
         dispatch_event.run(event_log_id=str(event.id))
 
-        mock_webhook_send.delay.assert_not_called()
+        mock_webhook_send.delay.assert_called_once()
+        event.refresh_from_db()
+        assert event.webhook_dispatched_at is not None
 
     @patch("plane.bgtasks.event_outbox.webhook_send_task")
     def test_deleted_event_falls_back_to_id_only_payload(self, mock_webhook_send):
