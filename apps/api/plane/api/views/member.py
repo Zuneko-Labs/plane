@@ -20,7 +20,7 @@ from django.db import transaction
 # Module imports
 from .base import BaseAPIView
 from plane.api.serializers import UserLiteSerializer, ProjectMemberSerializer
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.db.models import User, Workspace, WorkspaceMember, ProjectMember
 from plane.utils.permissions import ProjectMemberPermission, WorkSpaceAdminPermission, ProjectAdminPermission
 from plane.utils.openapi import (
@@ -163,7 +163,7 @@ class ProjectMemberListCreateAPIEndpoint(BaseAPIView):
             serializer.save(project_id=project_id)
             project_member = serializer.instance
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="project_member",
                 model_id=str(project_member.id),
                 requested_data=request.data,
@@ -172,7 +172,6 @@ class ProjectMemberListCreateAPIEndpoint(BaseAPIView):
                 workspace_id=project_member.workspace_id,
                 project_id=project_member.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -228,7 +227,7 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
         with transaction.atomic():
             serializer.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="project_member",
                 model_id=str(project_member.id),
                 requested_data=request.data,
@@ -237,7 +236,6 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
                 workspace_id=project_member.workspace_id,
                 project_id=project_member.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -255,7 +253,7 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
         with transaction.atomic():
             project_member.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="project_member",
                 model_id=str(project_member.id),
                 requested_data={"is_active": False},
@@ -264,5 +262,4 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
                 workspace_id=project_member.workspace_id,
                 project_id=project_member.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

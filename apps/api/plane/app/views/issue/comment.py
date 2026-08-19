@@ -22,7 +22,7 @@ from plane.app.permissions import allow_permission, ROLE
 from plane.db.models import IssueComment, ProjectMember, CommentReaction, Project, Issue
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.host import base_host
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.bgtasks.webhook_task import model_activity
 
 
@@ -96,7 +96,7 @@ class IssueCommentViewSet(BaseViewSet):
                     origin=base_host(request=request, is_app=True),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_comment",
                     model_id=str(serializer.data["id"]),
                     requested_data=request.data,
@@ -117,7 +117,6 @@ class IssueCommentViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -148,7 +147,7 @@ class IssueCommentViewSet(BaseViewSet):
                     origin=base_host(request=request, is_app=True),
                 )
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_comment",
                     model_id=str(pk),
                     requested_data=request.data,
@@ -169,7 +168,6 @@ class IssueCommentViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 

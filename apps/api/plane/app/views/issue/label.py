@@ -18,7 +18,7 @@ from rest_framework import status
 from .. import BaseViewSet, BaseAPIView
 from plane.app.serializers import LabelSerializer
 from plane.app.permissions import allow_permission, ProjectBasePermission, ROLE
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import Project, Label
 from plane.utils.cache import invalidate_cache
 
@@ -52,7 +52,7 @@ class LabelViewSet(BaseViewSet):
                     serializer.save(project_id=project_id)
                     label = serializer.instance
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="label",
                         model_id=str(label.id),
                         requested_data=request.data,
@@ -61,7 +61,6 @@ class LabelViewSet(BaseViewSet):
                         workspace_id=label.workspace_id,
                         project_id=label.project_id,
                     )
-                    transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError:
@@ -98,7 +97,7 @@ class LabelViewSet(BaseViewSet):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="label",
                     model_id=str(label.id),
                     requested_data=request.data,
@@ -107,7 +106,6 @@ class LabelViewSet(BaseViewSet):
                     workspace_id=label.workspace_id,
                     project_id=label.project_id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -121,14 +119,13 @@ class LabelViewSet(BaseViewSet):
         with transaction.atomic():
             response = super().destroy(request, *args, **kwargs)
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="label",
                 entity_id=label_id,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return response
 
 

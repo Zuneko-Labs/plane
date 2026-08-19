@@ -18,7 +18,7 @@ from rest_framework import status
 from .. import BaseViewSet
 from plane.app.serializers import IssueLinkSerializer
 from plane.app.permissions import ProjectEntityPermission
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import IssueLink
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.work_item_link_task import crawl_work_item_link_title
@@ -54,7 +54,7 @@ class IssueLinkViewSet(BaseViewSet):
                 serializer.save(project_id=project_id, issue_id=issue_id)
                 issue_link = IssueLink.objects.get(id=serializer.data.get("id"))
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_link",
                     model_id=str(issue_link.id),
                     requested_data=request.data,
@@ -77,7 +77,6 @@ class IssueLinkViewSet(BaseViewSet):
                         notification=True,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_link_created, robust=True)
 
@@ -97,7 +96,7 @@ class IssueLinkViewSet(BaseViewSet):
             with transaction.atomic():
                 serializer.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_link",
                     model_id=str(issue_link.id),
                     requested_data=request.data,
@@ -120,7 +119,6 @@ class IssueLinkViewSet(BaseViewSet):
                         notification=True,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_link_updated, robust=True)
 
@@ -136,7 +134,7 @@ class IssueLinkViewSet(BaseViewSet):
         with transaction.atomic():
             issue_link.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_link",
                 entity_id=str(pk),
                 actor_id=request.user.id,
@@ -156,7 +154,6 @@ class IssueLinkViewSet(BaseViewSet):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_link_deleted, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

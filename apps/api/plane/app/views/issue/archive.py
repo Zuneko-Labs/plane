@@ -24,7 +24,7 @@ from plane.app.serializers import (
     IssueSerializer,
     IssueDetailSerializer,
 )
-from plane.bgtasks.event_outbox import dispatch_event, write_archive_event
+from plane.bgtasks.event_outbox import emit_archive_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
     Issue,
@@ -278,7 +278,7 @@ class IssueArchiveViewSet(BaseViewSet):
             issue.archived_at = timezone.now().date()
             issue.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="issue",
                 model_id=str(issue.id),
                 archived=True,
@@ -286,7 +286,6 @@ class IssueArchiveViewSet(BaseViewSet):
                 workspace_id=issue.workspace_id,
                 project_id=issue.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response({"archived_at": str(issue.archived_at)}, status=status.HTTP_200_OK)
 
@@ -313,7 +312,7 @@ class IssueArchiveViewSet(BaseViewSet):
             issue.archived_at = None
             issue.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="issue",
                 model_id=str(issue.id),
                 archived=False,
@@ -321,7 +320,6 @@ class IssueArchiveViewSet(BaseViewSet):
                 workspace_id=issue.workspace_id,
                 project_id=issue.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -341,7 +339,6 @@ class BulkArchiveIssuesEndpoint(BaseAPIView):
         )
         with transaction.atomic():
             bulk_archive_issues = []
-            event_ids = []
             for issue in issues:
                 if issue.state.group not in ["completed", "cancelled"]:
                     return Response(
@@ -366,7 +363,7 @@ class BulkArchiveIssuesEndpoint(BaseAPIView):
                 bulk_archive_issues.append(issue)
 
                 # One event per issue — not one per request.
-                event = write_archive_event(
+                emit_archive_event(
                     model_name="issue",
                     model_id=str(issue.id),
                     archived=True,
@@ -374,13 +371,6 @@ class BulkArchiveIssuesEndpoint(BaseAPIView):
                     workspace_id=issue.workspace_id,
                     project_id=issue.project_id,
                 )
-                event_ids.append(str(event.id))
             Issue.objects.bulk_update(bulk_archive_issues, ["archived_at"])
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"archived_at": str(timezone.now().date())}, status=status.HTTP_200_OK)

@@ -21,7 +21,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 # Module imports
 from .. import BaseAPIView
 from plane.app.serializers import IssueAttachmentSerializer
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import FileAsset, Workspace
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.app.permissions import allow_permission, ROLE
@@ -50,7 +50,7 @@ class IssueAttachmentEndpoint(BaseAPIView):
                 )
                 attachment = serializer.instance
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_attachment",
                     model_id=str(attachment.id),
                     requested_data=request.data,
@@ -72,7 +72,6 @@ class IssueAttachmentEndpoint(BaseAPIView):
                         notification=True,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_attachment_created, robust=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -94,7 +93,7 @@ class IssueAttachmentEndpoint(BaseAPIView):
             issue_attachment.asset.delete(save=False)
             issue_attachment.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_attachment",
                 entity_id=str(pk),
                 actor_id=request.user.id,
@@ -114,7 +113,6 @@ class IssueAttachmentEndpoint(BaseAPIView):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
@@ -192,7 +190,7 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
         with transaction.atomic():
             issue_attachment.save()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_attachment",
                 entity_id=str(pk),
                 actor_id=request.user.id,
@@ -212,7 +210,6 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
@@ -267,7 +264,7 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
             with transaction.atomic():
                 issue_attachment.save()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue_attachment",
                     model_id=str(issue_attachment.id),
                     requested_data=request.data,
@@ -289,7 +286,6 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
                         notification=True,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_attachment_created, robust=True)
 
