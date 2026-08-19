@@ -24,7 +24,7 @@ from plane.app.serializers import (
     ProjectSerializer,
 )
 from plane.app.views.base import BaseAPIView, BaseViewSet
-from plane.bgtasks.event_outbox import dispatch_event, write_archive_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_archive_event, emit_delete_event, emit_model_event
 from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.bgtasks.webhook_task import model_activity, webhook_activity
 from plane.db.models import (
@@ -299,7 +299,7 @@ class ProjectViewSet(BaseViewSet):
 
                 project = self.get_queryset().filter(pk=serializer.data["id"]).first()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="project",
                     model_id=str(project.id),
                     requested_data=request.data,
@@ -319,7 +319,6 @@ class ProjectViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -383,7 +382,7 @@ class ProjectViewSet(BaseViewSet):
 
                 project = self.get_queryset().filter(pk=serializer.data["id"]).first()
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="project",
                     model_id=str(project.id),
                     requested_data=request.data,
@@ -402,7 +401,6 @@ class ProjectViewSet(BaseViewSet):
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
@@ -432,7 +430,7 @@ class ProjectViewSet(BaseViewSet):
                 workspace_id = project.workspace_id
                 project.delete()
 
-                event = write_delete_event(
+                emit_delete_event(
                     model_name="project",
                     entity_id=project_id,
                     actor_id=request.user.id,
@@ -453,7 +451,6 @@ class ProjectViewSet(BaseViewSet):
                         old_identifier=None,
                         new_identifier=None,
                     )
-                    dispatch_event.delay(event_log_id=str(event.id))
 
                 transaction.on_commit(_dispatch_webhook_activity, robust=True)
             # Delete the project members
@@ -479,14 +476,13 @@ class ProjectArchiveUnarchiveEndpoint(BaseAPIView):
             project.save()
             UserFavorite.objects.filter(workspace__slug=slug, project=project_id).delete()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="project",
                 model_id=str(project.id),
                 archived=True,
                 actor_id=request.user.id,
                 workspace_id=project.workspace_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response({"archived_at": str(project.archived_at)}, status=status.HTTP_200_OK)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -496,14 +492,13 @@ class ProjectArchiveUnarchiveEndpoint(BaseAPIView):
             project.archived_at = None
             project.save()
 
-            event = write_archive_event(
+            emit_archive_event(
                 model_name="project",
                 model_id=str(project.id),
                 archived=False,
                 actor_id=request.user.id,
                 workspace_id=project.workspace_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
