@@ -4,9 +4,14 @@
 
 from django.urls import path
 
-from plane.api.views import WorkspaceEventsAPIEndpoint
+from plane.api.views import WorkspaceEventsAPIEndpoint, WorkspaceEventsCheckpointAPIEndpoint
 
 urlpatterns = [
+    path(
+        "workspaces/<str:slug>/events/checkpoint/",
+        WorkspaceEventsCheckpointAPIEndpoint.as_view(http_method_names=["get"]),
+        name="workspace-events-checkpoint",
+    ),
     path(
         "workspaces/<str:slug>/events/",
         WorkspaceEventsAPIEndpoint.as_view(http_method_names=["get"]),

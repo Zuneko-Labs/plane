@@ -855,8 +855,9 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
 
         total_issues = len(issues)
 
-        # Capture workspace_id before deletion while we still have the rows.
+        # Capture workspace_id and names before deletion while we still have the rows.
         workspace_id = issues[0].workspace_id if total_issues else None
+        issue_names = {str(issue_id): name for issue_id, name in issues.values_list("id", "name")}
 
         with transaction.atomic():
             # First, delete all related cycle issues
@@ -879,6 +880,7 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
                         actor_id=request.user.id,
                         workspace_id=workspace_id,
                         project_id=project_id,
+                        entity_name=issue_names.get(str(issue_id)),
                     )
 
         return Response(

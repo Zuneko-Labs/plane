@@ -131,6 +131,7 @@ class IssueLinkViewSet(BaseViewSet):
     def destroy(self, request, slug, project_id, issue_id, pk):
         issue_link = IssueLink.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
         current_instance = json.dumps(IssueLinkSerializer(issue_link).data, cls=DjangoJSONEncoder)
+        link_name = issue_link.title or issue_link.url
         with transaction.atomic():
             issue_link.delete()
 
@@ -140,6 +141,7 @@ class IssueLinkViewSet(BaseViewSet):
                 actor_id=request.user.id,
                 workspace_id=issue_link.workspace_id,
                 project_id=issue_link.project_id,
+                entity_name=link_name,
             )
 
             def _dispatch_link_deleted():

@@ -114,6 +114,7 @@ class LabelViewSet(BaseViewSet):
     def destroy(self, request, *args, **kwargs):
         label = self.get_object()
         label_id = str(label.id)
+        label_name = label.name
         workspace_id = label.workspace_id
         project_id = label.project_id
         with transaction.atomic():
@@ -125,6 +126,7 @@ class LabelViewSet(BaseViewSet):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=label_name,
             )
         return response
 

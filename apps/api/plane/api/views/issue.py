@@ -918,6 +918,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             )
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
         workspace_id = issue.workspace_id
+        issue_name = issue.name
         with transaction.atomic():
             issue.delete()
             issue_activity.delay(
@@ -936,6 +937,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=issue_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1195,6 +1197,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
         """
         label = self.get_queryset().get(pk=pk)
         with transaction.atomic():
+            label_name = label.name
             label.delete()
 
             emit_delete_event(
@@ -1203,6 +1206,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
                 actor_id=request.user.id,
                 workspace_id=label.workspace_id,
                 project_id=label.project_id,
+                entity_name=label_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1471,6 +1475,7 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
         """
         issue_link = IssueLink.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
         current_instance = json.dumps(IssueLinkSerializer(issue_link).data, cls=DjangoJSONEncoder)
+        link_name = issue_link.title or issue_link.url
         with transaction.atomic():
             issue_link.delete()
 
@@ -1480,6 +1485,7 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=issue_link.workspace_id,
                 project_id=issue_link.project_id,
+                entity_name=link_name,
             )
 
             def _dispatch_link_deleted():
@@ -2235,6 +2241,7 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=issue_attachment.workspace_id,
                 project_id=issue_attachment.project_id,
+                entity_name=issue_attachment.attributes.get("name"),
             )
 
             def _dispatch_attachment_deleted():

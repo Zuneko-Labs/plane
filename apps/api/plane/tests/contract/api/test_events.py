@@ -63,6 +63,53 @@ class TestWorkspaceEventsAPIEndpoint:
         assert response.data["has_more"] is False
 
     @pytest.mark.django_db
+    def test_includes_human_readable_names(self, api_key_client, workspace, create_user):
+        event = _make_event(workspace, dispatch_seq=1, sequence=1)
+        from plane.db.models import EventLog
+
+        EventLog.objects.filter(pk=event.pk).update(
+            actor=create_user, data={"id": str(event.entity_id), "name": "My Project"}
+        )
+
+        response = api_key_client.get(self.get_url(workspace.slug, after=0))
+
+        assert response.status_code == status.HTTP_200_OK
+        result = response.data["results"][0]
+        assert result["workspace_slug"] == workspace.slug
+        assert result["entity_name"] == "My Project"
+        assert result["actor_name"] == create_user.display_name
+        assert result["actor_email"] == create_user.email
+
+    @pytest.mark.django_db
+    def test_resolves_user_fields_inside_data_snapshot(self, api_key_client, workspace, create_user):
+        from plane.db.models import EventLog, User
+
+        other_user = User.objects.create(email="lead@plane.so", username="lead", display_name="Lead Person")
+        event = _make_event(workspace, dispatch_seq=1, sequence=1, entity_type="module")
+        EventLog.objects.filter(pk=event.pk).update(
+            data={
+                "id": str(event.entity_id),
+                "name": "Module A",
+                "created_by": str(create_user.id),
+                "lead": str(other_user.id),
+                "members": [str(create_user.id), str(other_user.id)],
+                "project": str(workspace.id),  # not a user id — must pass through untouched
+            }
+        )
+
+        response = api_key_client.get(self.get_url(workspace.slug, after=0))
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data["results"][0]["data"]
+        assert data["created_by"] == {"id": str(create_user.id), "name": create_user.display_name, "email": create_user.email}
+        assert data["lead"] == {"id": str(other_user.id), "name": "Lead Person", "email": "lead@plane.so"}
+        assert data["members"] == [
+            {"id": str(create_user.id), "name": create_user.display_name, "email": create_user.email},
+            {"id": str(other_user.id), "name": "Lead Person", "email": "lead@plane.so"},
+        ]
+        assert data["project"] == str(workspace.id)
+
+    @pytest.mark.django_db
     def test_pending_events_are_never_returned(self, api_key_client, workspace):
         # dispatch_seq still NULL — the relay/fast path hasn't claimed it yet.
         write_event(
@@ -148,3 +195,52 @@ class TestWorkspaceEventsAPIEndpoint:
 
         response = api_key_client.get(self.get_url(workspace.slug, after=-1))
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.contract
+class TestWorkspaceEventsCheckpointAPIEndpoint:
+    def get_url(self, workspace_slug):
+        return f"/api/v1/workspaces/{workspace_slug}/events/checkpoint/"
+
+    @pytest.mark.django_db
+    def test_returns_latest_dispatch_seq(self, api_key_client, workspace):
+        _make_event(workspace, dispatch_seq=1, sequence=1)
+        _make_event(workspace, dispatch_seq=5, sequence=5)
+
+        response = api_key_client.get(self.get_url(workspace.slug))
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["latest_dispatch_seq"] == 5
+
+    @pytest.mark.django_db
+    def test_empty_workspace_returns_zero(self, api_key_client, workspace):
+        response = api_key_client.get(self.get_url(workspace.slug))
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["latest_dispatch_seq"] == 0
+
+    @pytest.mark.django_db
+    def test_ignores_pending_events(self, api_key_client, workspace):
+        # dispatch_seq still NULL — not yet claimed by the relay/fast path.
+        write_event(
+            workspace_id=workspace.id, entity_type="project", entity_id=uuid4(), event_type="project.created"
+        )
+        _make_event(workspace, dispatch_seq=3, sequence=3)
+
+        response = api_key_client.get(self.get_url(workspace.slug))
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["latest_dispatch_seq"] == 3
+
+    @pytest.mark.django_db
+    def test_workspace_scoping_is_enforced(self, api_key_client, workspace, create_user):
+        other_workspace = Workspace.objects.create(name="Other Workspace", owner=create_user, slug="other-workspace")
+        WorkspaceMember.objects.create(workspace=other_workspace, member=create_user, role=20)
+
+        _make_event(workspace, dispatch_seq=1, sequence=1)
+        _make_event(other_workspace, dispatch_seq=99, sequence=99)
+
+        response = api_key_client.get(self.get_url(workspace.slug))
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["latest_dispatch_seq"] == 1

@@ -262,6 +262,7 @@ class StateDetailAPIEndpoint(BaseAPIView):
             )
 
         with transaction.atomic():
+            state_name = state.name
             state.delete()
 
             emit_delete_event(
@@ -270,6 +271,7 @@ class StateDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=state.workspace_id,
                 project_id=state.project_id,
+                entity_name=state_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 

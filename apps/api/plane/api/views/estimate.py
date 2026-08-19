@@ -165,6 +165,7 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
             estimate_id = str(estimate.id)
             workspace_id = estimate.workspace_id
             project_id = estimate.project_id
+            estimate_name = estimate.name
             estimate.delete()
 
             emit_delete_event(
@@ -173,6 +174,7 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=estimate_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -358,6 +360,7 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
             estimate_point_id = str(estimate_point.id)
             workspace_id = estimate_point.workspace_id
             project_id = estimate_point.project_id
+            estimate_point_value = estimate_point.value
             estimate_point.delete()
 
             emit_delete_event(
@@ -366,5 +369,6 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=estimate_point_value,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)

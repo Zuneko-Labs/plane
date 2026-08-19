@@ -89,6 +89,7 @@ class IssueAttachmentEndpoint(BaseAPIView):
             )
         workspace_id = issue_attachment.workspace_id
         attachment_project_id = issue_attachment.project_id
+        attachment_name = issue_attachment.attributes.get("name")
         with transaction.atomic():
             issue_attachment.asset.delete(save=False)
             issue_attachment.delete()
@@ -99,6 +100,7 @@ class IssueAttachmentEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=attachment_project_id,
+                entity_name=attachment_name,
             )
 
             def _dispatch_attachment_deleted():
@@ -196,6 +198,7 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=issue_attachment.workspace_id,
                 project_id=issue_attachment.project_id,
+                entity_name=issue_attachment.attributes.get("name"),
             )
 
             def _dispatch_attachment_deleted():

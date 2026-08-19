@@ -621,6 +621,7 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=module.name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1016,6 +1017,7 @@ class ModuleIssueDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=module_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 

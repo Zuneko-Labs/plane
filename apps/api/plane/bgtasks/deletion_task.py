@@ -139,14 +139,17 @@ def hard_delete():
 
     # Helper: emit delete events for hard-deleted rows.
     # emit_delete_event writes outbox rows and schedules dispatch atomically.
-    def _hard_delete_with_events(model, workspace_fk="workspace_id", project_fk="project_id"):
+    def _hard_delete_with_events(model, workspace_fk="workspace_id", project_fk="project_id", name_field=None):
         """
         Hard-delete all rows past the retention window and emit one
         ``<entity>.deleted`` outbox event per row so consumers don't diverge.
 
         ``workspace_fk`` / ``project_fk`` are the field names on the model
         that hold workspace/project context; pass ``None`` for models that
-        have no such field.
+        have no such field. ``name_field`` is the model field holding its
+        display name (e.g. "name", "title", "value") captured before the
+        row disappears, for consumers rendering deletion events; omit for
+        models with no single meaningful name field.
         """
         qs = model.all_objects.filter(deleted_at__lt=cutoff)
         # Collect the fields we need before the rows disappear.
@@ -155,6 +158,8 @@ def hard_delete():
             extra["workspace_id"] = workspace_fk
         if project_fk:
             extra["project_id"] = project_fk
+        if name_field:
+            extra["name"] = name_field
 
         rows = list(qs.values("id", *[v for v in extra.values()]))
 
@@ -168,33 +173,34 @@ def hard_delete():
                     actor_id=None,  # system-initiated
                     workspace_id=row.get(workspace_fk) if workspace_fk else None,
                     project_id=row.get(project_fk) if project_fk else None,
+                    entity_name=row.get(name_field) if name_field else None,
                 )
 
     # Entity types that have meaningful consumers in the events API.
     # Order mirrors the original cascade order (parents before children where
     # Django would cascade, but hard_delete already handles each table
     # independently so order mainly matters for FK constraint safety).
-    _hard_delete_with_events(Workspace, workspace_fk="id", project_fk=None)
-    _hard_delete_with_events(Project, workspace_fk="workspace_id", project_fk="id")
-    _hard_delete_with_events(Cycle)
-    _hard_delete_with_events(Module)
-    _hard_delete_with_events(Issue)
-    _hard_delete_with_events(Page)
-    _hard_delete_with_events(IssueView)
-    _hard_delete_with_events(Label)
-    _hard_delete_with_events(State)
+    _hard_delete_with_events(Workspace, workspace_fk="id", project_fk=None, name_field="name")
+    _hard_delete_with_events(Project, workspace_fk="workspace_id", project_fk="id", name_field="name")
+    _hard_delete_with_events(Cycle, name_field="name")
+    _hard_delete_with_events(Module, name_field="name")
+    _hard_delete_with_events(Issue, name_field="name")
+    _hard_delete_with_events(Page, name_field="name")
+    _hard_delete_with_events(IssueView, name_field="name")
+    _hard_delete_with_events(Label, name_field="name")
+    _hard_delete_with_events(State, name_field="name")
 
     # Activity / join tables — emit events but they typically have no
     # direct webhook subscribers; still important for pull-API consumers.
     _hard_delete_with_events(IssueActivity)
     _hard_delete_with_events(IssueComment)
-    _hard_delete_with_events(IssueLink)
+    _hard_delete_with_events(IssueLink, name_field="title")
     _hard_delete_with_events(IssueReaction)
     _hard_delete_with_events(UserFavorite, project_fk=None)
     _hard_delete_with_events(ModuleIssue)
     _hard_delete_with_events(CycleIssue)
-    _hard_delete_with_events(Estimate)
-    _hard_delete_with_events(EstimatePoint)
+    _hard_delete_with_events(Estimate, name_field="name")
+    _hard_delete_with_events(EstimatePoint, name_field="value")
 
     # Catch-all for any remaining models with deleted_at that weren't
     # covered explicitly above.  These get a plain hard-delete without

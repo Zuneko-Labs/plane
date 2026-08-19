@@ -427,6 +427,7 @@ class ProjectViewSet(BaseViewSet):
             project = Project.objects.get(pk=pk, workspace__slug=slug)
             with transaction.atomic():
                 project_id = project.id
+                project_name = project.name
                 workspace_id = project.workspace_id
                 project.delete()
 
@@ -435,6 +436,7 @@ class ProjectViewSet(BaseViewSet):
                     entity_id=project_id,
                     actor_id=request.user.id,
                     workspace_id=workspace_id,
+                    entity_name=project_name,
                 )
 
                 def _dispatch_webhook_activity():

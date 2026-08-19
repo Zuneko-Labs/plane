@@ -653,6 +653,7 @@ class CycleDetailAPIEndpoint(BaseAPIView):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                entity_name=cycle.name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 

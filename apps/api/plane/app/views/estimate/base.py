@@ -200,6 +200,7 @@ class BulkEstimatePointEndpoint(BaseViewSet):
     def destroy(self, request, slug, project_id, estimate_id):
         estimate = Estimate.objects.get(pk=estimate_id, workspace__slug=slug, project_id=project_id)
         with transaction.atomic():
+            estimate_name = estimate.name
             estimate.delete()
 
             emit_delete_event(
@@ -208,6 +209,7 @@ class BulkEstimatePointEndpoint(BaseViewSet):
                 actor_id=request.user.id,
                 workspace_id=estimate.workspace_id,
                 project_id=estimate.project_id,
+                entity_name=estimate_name,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -349,6 +351,7 @@ class EstimatePointEndpoint(BaseViewSet):
             old_point_id = old_estimate_point.id
             workspace_id = old_estimate_point.workspace_id
             old_point_project_id = old_estimate_point.project_id
+            old_point_value = old_estimate_point.value
             old_estimate_point.delete()
 
             emit_delete_event(
@@ -357,6 +360,7 @@ class EstimatePointEndpoint(BaseViewSet):
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=old_point_project_id,
+                entity_name=old_point_value,
             )
 
         return Response(

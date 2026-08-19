@@ -268,8 +268,16 @@ def write_delete_event(
     actor_id: Optional[UUID],
     workspace_id: UUID,
     project_id: Optional[UUID] = None,
+    entity_name: Optional[str] = None,
 ) -> EventLog:
-    """A drop-in parallel to the existing ``webhook_activity.delay(verb="deleted", ...)`` calls."""
+    """A drop-in parallel to the existing ``webhook_activity.delay(verb="deleted", ...)`` calls.
+
+    ``entity_name`` is the deleted row's display name (e.g. project/cycle/
+    state name), captured by the caller *before* the row is gone — once
+    deleted there is no DB row left to look it up from. Optional because
+    not every entity type has a meaningful name (e.g. a relation row);
+    omit it there rather than passing a placeholder.
+    """
     return write_event(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -277,7 +285,7 @@ def write_delete_event(
         entity_id=entity_id,
         event_type=f"{model_name}.deleted",
         actor_id=actor_id,
-        data=None,
+        data={"name": entity_name} if entity_name else None,
         changes=None,
     )
 
@@ -364,6 +372,7 @@ def emit_delete_event(
     actor_id: Optional[UUID],
     workspace_id: UUID,
     project_id: Optional[UUID] = None,
+    entity_name: Optional[str] = None,
 ) -> None:
     """
     Convenience wrapper that combines ``write_delete_event`` with the
@@ -377,6 +386,7 @@ def emit_delete_event(
         actor_id=actor_id,
         workspace_id=workspace_id,
         project_id=project_id,
+        entity_name=entity_name,
     )
     event_id = str(event.id)
     transaction.on_commit(lambda: dispatch_event.delay(event_log_id=event_id), robust=True)

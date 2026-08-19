@@ -579,6 +579,7 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
         project = Project.objects.get(pk=pk, workspace__slug=slug)
         with transaction.atomic():
             project_id = project.id
+            project_name = project.name
             workspace_id = project.workspace_id
             # Delete the user favorite cycle
             UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
@@ -589,6 +590,7 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
                 entity_id=project_id,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
+                entity_name=project_name,
             )
 
             def _dispatch_webhook_activity():
