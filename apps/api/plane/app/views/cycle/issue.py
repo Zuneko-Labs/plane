@@ -22,7 +22,7 @@ from rest_framework.response import Response
 # Module imports
 from .. import BaseViewSet
 from plane.app.serializers import CycleIssueSerializer
-from plane.bgtasks.event_outbox import dispatch_event, write_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import Cycle, CycleIssue, Issue, FileAsset, IssueLink
 from plane.utils.grouper import (
@@ -334,9 +334,8 @@ class CycleIssueViewSet(BaseViewSet):
             )
 
             # Outbox: one event per added/moved cycle-issue link, not one per request.
-            event_ids = []
             for record in created_records:
-                event = write_event(
+                emit_event(
                     workspace_id=cycle.workspace_id,
                     project_id=project_id,
                     entity_type="cycle_issue",
@@ -345,9 +344,8 @@ class CycleIssueViewSet(BaseViewSet):
                     actor_id=request.user.id,
                     data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
                 )
-                event_ids.append(str(event.id))
             for record, activity in zip(updated_records, update_cycle_issue_activity):
-                event = write_event(
+                emit_event(
                     workspace_id=cycle.workspace_id,
                     project_id=project_id,
                     entity_type="cycle_issue",
@@ -357,13 +355,6 @@ class CycleIssueViewSet(BaseViewSet):
                     data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
                     changes={"cycle_id": {"old": activity["old_cycle_id"], "new": activity["new_cycle_id"]}},
                 )
-                event_ids.append(str(event.id))
-
-            def _dispatch_events():
-                for event_id in event_ids:
-                    dispatch_event.delay(event_log_id=event_id)
-
-            transaction.on_commit(_dispatch_events, robust=True)
 
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
@@ -396,13 +387,11 @@ class CycleIssueViewSet(BaseViewSet):
             cycle_issue.delete()
 
             if existing is not None:
-                event = write_event(
+                emit_delete_event(
+                    model_name="cycle_issue",
+                    entity_id=existing.id,
+                    actor_id=request.user.id,
                     workspace_id=existing.workspace_id,
                     project_id=project_id,
-                    entity_type="cycle_issue",
-                    entity_id=existing.id,
-                    event_type="cycle_issue.deleted",
-                    actor_id=request.user.id,
                 )
-                transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
