@@ -16,7 +16,7 @@ from drf_spectacular.utils import OpenApiRequest, OpenApiResponse
 # Module imports
 from plane.app.permissions.project import ProjectEntityPermission
 from plane.api.views.base import BaseAPIView
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import Estimate, EstimatePoint, Project, Workspace
 from plane.api.serializers import EstimateSerializer, EstimatePointSerializer
 from plane.utils.openapi.decorators import estimate_docs, estimate_point_docs
@@ -76,7 +76,7 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
             serializer.save()
             estimate = serializer.instance
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="estimate",
                 model_id=str(estimate.id),
                 requested_data=request.data,
@@ -85,7 +85,6 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
                 workspace_id=estimate.workspace_id,
                 project_id=estimate.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @estimate_docs(
@@ -139,7 +138,7 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             serializer.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="estimate",
                 model_id=str(estimate.id),
                 requested_data=filtered_data,
@@ -148,7 +147,6 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
                 workspace_id=estimate.workspace_id,
                 project_id=estimate.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @estimate_docs(
@@ -169,14 +167,13 @@ class ProjectEstimateAPIEndpoint(BaseAPIView):
             project_id = estimate.project_id
             estimate.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="estimate",
                 entity_id=estimate_id,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -273,8 +270,8 @@ class EstimatePointListCreateAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             created = EstimatePoint.objects.bulk_create(estimate_points)
 
-            events = [
-                write_model_event(
+            for point in created:
+                emit_model_event(
                     model_name="estimate_point",
                     model_id=str(point.id),
                     requested_data=None,
@@ -283,11 +280,6 @@ class EstimatePointListCreateAPIEndpoint(BaseAPIView):
                     workspace_id=point.workspace_id,
                     project_id=point.project_id,
                 )
-                for point in created
-            ]
-            transaction.on_commit(
-                lambda: [dispatch_event.delay(event_log_id=str(event.id)) for event in events], robust=True
-            )
         return Response(
             self.serializer_class(created, many=True).data,
             status=status.HTTP_201_CREATED,
@@ -339,7 +331,7 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
         with transaction.atomic():
             serializer.save()
 
-            event = write_model_event(
+            emit_model_event(
                 model_name="estimate_point",
                 model_id=str(estimate_point.id),
                 requested_data=filtered_data,
@@ -348,7 +340,6 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
                 workspace_id=estimate_point.workspace_id,
                 project_id=estimate_point.project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @estimate_point_docs(
@@ -369,12 +360,11 @@ class EstimatePointDetailAPIEndpoint(BaseAPIView):
             project_id = estimate_point.project_id
             estimate_point.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="estimate_point",
                 entity_id=estimate_point_id,
                 actor_id=request.user.id,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-            transaction.on_commit(lambda: dispatch_event.delay(event_log_id=str(event.id)), robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
