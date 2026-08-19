@@ -22,7 +22,7 @@ from rest_framework import status
 from .. import BaseViewSet
 from plane.app.serializers import IssueRelationSerializer, RelatedIssueSerializer
 from plane.app.permissions import ProjectEntityPermission
-from plane.bgtasks.event_outbox import dispatch_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event, emit_delete_event
 from plane.db.models import (
     Project,
     IssueRelation,
@@ -274,8 +274,8 @@ class IssueRelationViewSet(BaseViewSet):
                 if (relation.issue_id, relation.related_issue_id) not in existing_pairs
             ]
 
-            events = [
-                write_model_event(
+            for relation in created_relations:
+                emit_model_event(
                     model_name="issue_relation",
                     model_id=str(relation.id),
                     requested_data=request.data,
@@ -284,8 +284,6 @@ class IssueRelationViewSet(BaseViewSet):
                     workspace_id=relation.workspace_id,
                     project_id=relation.project_id,
                 )
-                for relation in created_relations
-            ]
 
             def _dispatch_relations_created():
                 issue_activity.delay(
@@ -299,8 +297,6 @@ class IssueRelationViewSet(BaseViewSet):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                for event in events:
-                    dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_relations_created, robust=True)
 
@@ -331,7 +327,7 @@ class IssueRelationViewSet(BaseViewSet):
         with transaction.atomic():
             issue_relations.delete()
 
-            event = write_delete_event(
+            emit_delete_event(
                 model_name="issue_relation",
                 entity_id=str(relation_id),
                 actor_id=request.user.id,
@@ -351,7 +347,6 @@ class IssueRelationViewSet(BaseViewSet):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
-                dispatch_event.delay(event_log_id=str(event.id))
 
             transaction.on_commit(_dispatch_relation_deleted, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

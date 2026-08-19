@@ -90,11 +90,8 @@ from .base import BaseAPIView
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
 from plane.bgtasks.event_outbox import (
-    dispatch_event,
     emit_delete_event,
     emit_model_event,
-    write_delete_event,
-    write_model_event,
 )
 from plane.bgtasks.webhook_task import model_activity
 from plane.app.permissions import ROLE

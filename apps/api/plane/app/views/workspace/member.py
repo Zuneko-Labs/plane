@@ -26,7 +26,7 @@ from plane.app.serializers import (
     WorkSpaceMemberSerializer,
 )
 from plane.app.views.base import BaseAPIView
-from plane.bgtasks.event_outbox import dispatch_event, write_model_event
+from plane.bgtasks.event_outbox import emit_model_event, emit_delete_event
 from plane.db.models import Project, ProjectMember, WorkspaceMember, DraftIssue
 from plane.utils.cache import invalidate_cache
 
@@ -47,25 +47,21 @@ def _bulk_update_project_members_and_emit(*, queryset, update_kwargs, requested_
     """
     affected = list(queryset)
     if not affected:
-        return []
+        return
 
     before_by_id = {member.id: ProjectMemberSerializer(member).data for member in affected}
     queryset.model.objects.filter(pk__in=[member.id for member in affected]).update(**update_kwargs)
 
-    events = []
     for member in affected:
-        events.append(
-            write_model_event(
-                model_name="project_member",
-                model_id=str(member.id),
-                requested_data=requested_data,
-                current_instance=json.dumps(before_by_id[member.id], cls=DjangoJSONEncoder),
-                actor_id=actor_id,
-                workspace_id=member.workspace_id,
-                project_id=member.project_id,
-            )
+        emit_model_event(
+            model_name="project_member",
+            model_id=str(member.id),
+            requested_data=requested_data,
+            current_instance=json.dumps(before_by_id[member.id], cls=DjangoJSONEncoder),
+            actor_id=actor_id,
+            workspace_id=member.workspace_id,
+            project_id=member.project_id,
         )
-    return events
 
 
 class WorkSpaceMemberViewSet(BaseViewSet):
@@ -132,34 +128,25 @@ class WorkSpaceMemberViewSet(BaseViewSet):
             with transaction.atomic():
                 serializer.save()
 
-                events = [
-                    write_model_event(
-                        model_name="workspace_member",
-                        model_id=str(workspace_member.id),
-                        requested_data=request.data,
-                        current_instance=current_instance,
-                        actor_id=request.user.id,
-                        workspace_id=workspace_member.workspace_id,
-                    )
-                ]
+                emit_model_event(
+                    model_name="workspace_member",
+                    model_id=str(workspace_member.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=workspace_member.workspace_id,
+                )
 
                 # If a user is moved to a guest role he can't have any other role in projects
                 if "role" in request.data and int(request.data.get("role")) == 5:
-                    events.extend(
-                        _bulk_update_project_members_and_emit(
-                            queryset=ProjectMember.objects.filter(
-                                workspace__slug=slug, member_id=workspace_member.member_id
-                            ),
-                            update_kwargs={"role": 5},
-                            requested_data={"role": 5},
-                            actor_id=request.user.id,
-                        )
+                    _bulk_update_project_members_and_emit(
+                        queryset=ProjectMember.objects.filter(
+                            workspace__slug=slug, member_id=workspace_member.member_id
+                        ),
+                        update_kwargs={"role": 5},
+                        requested_data={"role": 5},
+                        actor_id=request.user.id,
                     )
-
-                event_ids = [str(event.id) for event in events]
-                transaction.on_commit(
-                    lambda: [dispatch_event.delay(event_log_id=event_id) for event_id in event_ids], robust=True
-                )
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -212,7 +199,7 @@ class WorkSpaceMemberViewSet(BaseViewSet):
 
         with transaction.atomic():
             # Deactivate the users from the projects where the user is part of
-            events = _bulk_update_project_members_and_emit(
+            _bulk_update_project_members_and_emit(
                 queryset=ProjectMember.objects.filter(
                     workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
                 ),
@@ -224,19 +211,13 @@ class WorkSpaceMemberViewSet(BaseViewSet):
             workspace_member.is_active = False
             workspace_member.save()
 
-            events.append(
-                write_model_event(
-                    model_name="workspace_member",
-                    model_id=str(workspace_member.id),
-                    requested_data={"is_active": False},
-                    current_instance=current_instance,
-                    actor_id=request.user.id,
-                    workspace_id=workspace_member.workspace_id,
-                )
-            )
-            event_ids = [str(event.id) for event in events]
-            transaction.on_commit(
-                lambda: [dispatch_event.delay(event_log_id=event_id) for event_id in event_ids], robust=True
+            emit_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -289,7 +270,7 @@ class WorkSpaceMemberViewSet(BaseViewSet):
 
         with transaction.atomic():
             # # Deactivate the users from the projects where the user is part of
-            events = _bulk_update_project_members_and_emit(
+            _bulk_update_project_members_and_emit(
                 queryset=ProjectMember.objects.filter(
                     workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
                 ),
@@ -302,19 +283,13 @@ class WorkSpaceMemberViewSet(BaseViewSet):
             workspace_member.is_active = False
             workspace_member.save()
 
-            events.append(
-                write_model_event(
-                    model_name="workspace_member",
-                    model_id=str(workspace_member.id),
-                    requested_data={"is_active": False},
-                    current_instance=current_instance,
-                    actor_id=request.user.id,
-                    workspace_id=workspace_member.workspace_id,
-                )
-            )
-            event_ids = [str(event.id) for event in events]
-            transaction.on_commit(
-                lambda: [dispatch_event.delay(event_log_id=event_id) for event_id in event_ids], robust=True
+            emit_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 

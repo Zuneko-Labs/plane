@@ -42,7 +42,7 @@ from plane.app.serializers import (
     ProjectUserPropertySerializer,
     RecurrenceSerializer,
 )
-from plane.bgtasks.event_outbox import dispatch_event, emit_delete_event, emit_model_event, write_delete_event, write_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
 from plane.bgtasks.recent_visited_task import recent_visited_task
@@ -509,7 +509,7 @@ class IssueViewSet(BaseViewSet):
                 datetime_fields = ["created_at", "updated_at"]
                 issue = user_timezone_converter(issue, datetime_fields, request.user.user_timezone)
 
-                event = write_model_event(
+                emit_model_event(
                     model_name="issue",
                     model_id=str(serializer.data["id"]),
                     requested_data=request.data,
@@ -521,8 +521,8 @@ class IssueViewSet(BaseViewSet):
                 )
 
                 # Send the model activity
-                def _dispatch_model_activity():
-                    model_activity.delay(
+                transaction.on_commit(
+                    lambda: model_activity.delay(
                         model_name="issue",
                         model_id=str(serializer.data["id"]),
                         requested_data=request.data,
@@ -530,10 +530,9 @@ class IssueViewSet(BaseViewSet):
                         actor_id=request.user.id,
                         slug=slug,
                         origin=base_host(request=request, is_app=True),
-                    )
-                    dispatch_event.delay(event_log_id=str(event.id))
-
-                transaction.on_commit(_dispatch_model_activity, robust=True)
+                    ),
+                    robust=True,
+                )
 
                 # updated issue description version
                 issue_description_version_task.delay(
@@ -753,7 +752,7 @@ class IssueViewSet(BaseViewSet):
                         origin=base_host(request=request, is_app=True),
                     )
 
-                    event = write_model_event(
+                    emit_model_event(
                         model_name="issue",
                         model_id=str(serializer.data.get("id", None)),
                         requested_data=request.data,
@@ -764,8 +763,9 @@ class IssueViewSet(BaseViewSet):
                         instance=issue,
                     )
 
-                    def _dispatch_model_activity():
-                        model_activity.delay(
+                    # Send the model activity
+                    transaction.on_commit(
+                        lambda: model_activity.delay(
                             model_name="issue",
                             model_id=str(serializer.data.get("id", None)),
                             requested_data=request.data,
@@ -773,10 +773,9 @@ class IssueViewSet(BaseViewSet):
                             actor_id=request.user.id,
                             slug=slug,
                             origin=base_host(request=request, is_app=True),
-                        )
-                        dispatch_event.delay(event_log_id=str(event.id))
-
-                    transaction.on_commit(_dispatch_model_activity, robust=True)
+                        ),
+                        robust=True,
+                    )
 
                     # updated issue description version
                     issue_description_version_task.delay(
