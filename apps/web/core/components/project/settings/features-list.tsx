@@ -5,6 +5,7 @@
  */
 
 import { observer } from "mobx-react";
+import { useEffect } from "react";
 // plane imports
 import { useTranslation } from "@plane/i18n";
 import { setPromiseToast } from "@plane/propel/toast";
@@ -83,6 +84,14 @@ export const ProjectFeaturesList = observer(function ProjectFeaturesList(props: 
   // derived values
   const currentProjectDetails = getProjectById(projectId);
 
+  // modules must always stay enabled: force-enable it once if a project was left with it off
+  useEffect(() => {
+    if (!workspaceSlug || !projectId || !currentProjectDetails) return;
+    if (currentProjectDetails.module_view === false) {
+      void updateProject(workspaceSlug, projectId, { module_view: true });
+    }
+  }, [workspaceSlug, projectId, currentProjectDetails, updateProject]);
+
   const handleSubmit = (_featureKey: string, featureProperty: string) => {
     if (!workspaceSlug || !projectId || !currentProjectDetails) return;
 
@@ -132,9 +141,13 @@ export const ProjectFeaturesList = observer(function ProjectFeaturesList(props: 
                     workspaceSlug={workspaceSlug}
                     projectId={projectId}
                     featureItem={featureItem}
-                    value={Boolean(currentProjectDetails?.[featureItem.property as keyof IProject])}
+                    value={
+                      featureItemKey === "modules"
+                        ? true
+                        : Boolean(currentProjectDetails?.[featureItem.property as keyof IProject])
+                    }
                     handleSubmit={handleSubmit}
-                    disabled={!isAdmin}
+                    disabled={featureItemKey === "modules" ? true : !isAdmin}
                   />
                 }
               />
