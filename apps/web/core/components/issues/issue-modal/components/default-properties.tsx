@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import type { Control } from "react-hook-form";
+import type { Control, FormState } from "react-hook-form";
 import { Controller } from "react-hook-form";
 import { ETabIndices, EUserPermissions, EUserPermissionsLevel } from "@plane/constants";
 import { useTranslation } from "@plane/i18n";
@@ -37,6 +37,7 @@ import { IssueIdentifier } from "@/plane-web/components/issues/issue-details/iss
 
 type TIssueDefaultPropertiesProps = {
   control: Control<TIssue>;
+  formState: FormState<TIssue>;
   id: string | undefined;
   projectId: string | null;
   workspaceSlug: string;
@@ -52,6 +53,7 @@ type TIssueDefaultPropertiesProps = {
 export const IssueDefaultProperties = observer(function IssueDefaultProperties(props: TIssueDefaultPropertiesProps) {
   const {
     control,
+    formState: { errors },
     id,
     projectId,
     workspaceSlug,
@@ -225,21 +227,29 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
         <Controller
           control={control}
           name="module_ids"
+          rules={{
+            validate: (value) => (value && value.length > 0 ? undefined : t("module_is_required")),
+          }}
           render={({ field: { value, onChange } }) => (
-            <div className="h-7">
-              <ModuleDropdown
-                projectId={projectId ?? undefined}
-                value={value ?? []}
-                onChange={(moduleIds) => {
-                  onChange(moduleIds);
-                  handleFormChange();
-                }}
-                placeholder={t("modules")}
-                buttonVariant="border-with-text"
-                tabIndex={getIndex("module_ids")}
-                multiple
-                showCount
-              />
+            <div className="flex flex-col gap-1">
+              <div className="h-7">
+                <ModuleDropdown
+                  projectId={projectId ?? undefined}
+                  value={value ?? []}
+                  onChange={(moduleIds) => {
+                    onChange(moduleIds);
+                    handleFormChange();
+                  }}
+                  placeholder={t("modules")}
+                  buttonVariant="border-with-text"
+                  tabIndex={getIndex("module_ids")}
+                  multiple
+                  showCount
+                />
+              </div>
+              {errors.module_ids && (
+                <span className="text-caption-sm-medium text-danger-primary">{errors.module_ids.message}</span>
+              )}
             </div>
           )}
         />

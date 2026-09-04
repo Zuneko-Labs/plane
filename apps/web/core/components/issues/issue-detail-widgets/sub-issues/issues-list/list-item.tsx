@@ -16,6 +16,7 @@ import { ControlLink, CustomMenu } from "@plane/ui";
 import { cn, generateWorkItemLink } from "@plane/utils";
 // helpers
 import { useSubIssueOperations } from "@/components/issues/issue-detail-widgets/sub-issues/helper";
+import { useIsWorkItemDeleteAllowed } from "@/components/issues/issue-layouts/quick-action-dropdowns/helper";
 import { WithDisplayPropertiesHOC } from "@/components/issues/issue-layouts/properties/with-display-properties-HOC";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
@@ -76,6 +77,7 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
   const { handleRedirection } = useIssuePeekOverviewRedirection();
   const { isMobile } = usePlatformOS();
   const issue = getIssueById(issueId);
+  const isDeletingAllowed = useIsWorkItemDeleteAllowed(workspaceSlug, issue?.project_id ?? undefined);
 
   // derived values
   const projectDetail = (issue && issue.project_id && project.getProjectById(issue.project_id)) || undefined;
@@ -231,7 +233,7 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
                   </CustomMenu.MenuItem>
                 )}
 
-                {canEdit && (
+                {canEdit && isDeletingAllowed && (
                   <CustomMenu.MenuItem
                     onClick={() => {
                       handleIssueCrudState("delete", parentIssueId, issue);

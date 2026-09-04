@@ -223,6 +223,36 @@ class ModuleIssueViewSet(BaseViewSet):
                 pk__in=issues,
             ).values_list("id", flat=True)
         )
+
+        # This endpoint is additive-only (no "removed" concept), so any issue
+        # that already belongs to a *different* module must be rejected —
+        # attaching it here silently would leave it in two modules at once.
+        # Validate everything up front (all-or-nothing) before creating rows.
+        conflicting = list(
+            ModuleIssue.objects.filter(
+                workspace__slug=slug,
+                project_id=project_id,
+                issue_id__in=issues,
+            )
+            .exclude(module_id=module_id)
+            .select_related("issue")
+        )
+        if conflicting:
+            return Response(
+                {
+                    "error": "A work item must belong to exactly one module",
+                    "conflicts": [
+                        {
+                            "issue_id": str(module_issue.issue_id),
+                            "issue_name": module_issue.issue.name if module_issue.issue else None,
+                            "module_id": str(module_issue.module_id),
+                        }
+                        for module_issue in conflicting
+                    ],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         with transaction.atomic():
             created_records = ModuleIssue.objects.bulk_create(
                 [
@@ -278,6 +308,25 @@ class ModuleIssueViewSet(BaseViewSet):
         modules = request.data.get("modules", [])
         removed_modules = request.data.get("removed_modules", [])
         project = Project.objects.get(pk=project_id)
+
+        # A work item must end up belonging to exactly one module. Compute the
+        # resulting module set BEFORE mutating anything so a bad request is
+        # rejected without touching the DB (moving modules — remove old + add
+        # new in the same call — is fine; only 0 or 2+ at the end is not).
+        current_module_ids = set(
+            str(module_id)
+            for module_id in ModuleIssue.objects.filter(
+                workspace__slug=slug,
+                project_id=project_id,
+                issue_id=issue_id,
+            ).values_list("module_id", flat=True)
+        )
+        final_module_ids = (current_module_ids - {str(m) for m in removed_modules}) | {str(m) for m in modules}
+        if len(final_module_ids) != 1:
+            return Response(
+                {"error": "A work item must belong to exactly one module"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         with transaction.atomic():
             if modules:

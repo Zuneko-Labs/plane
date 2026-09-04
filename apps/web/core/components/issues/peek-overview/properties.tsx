@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import { useState } from "react";
 import { observer } from "mobx-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
@@ -21,6 +22,7 @@ import {
   EstimatePropertyIcon,
   ParentPropertyIcon,
 } from "@plane/propel/icons";
+import type { TIssue } from "@plane/types";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@plane/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
@@ -35,6 +37,8 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
+import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
 // plane web components
 import { WorkItemAdditionalSidebarProperties } from "@/plane-web/components/issues/issue-details/additional-properties";
 import { IssueParentSelectRoot } from "@/plane-web/components/issues/issue-details/parent-select-root";
@@ -46,6 +50,8 @@ import { IssueCycleSelect } from "../issue-detail/cycle-select";
 import { IssueLabel } from "../issue-detail/label";
 import { IssueModuleSelect } from "../issue-detail/module-select";
 import { IssueRecurrenceToggle } from "../issue-detail/recurrence-toggle";
+import { ApprovalSentBackModal } from "../approval-sent-back-modal";
+import { RegistrationAgentModal } from "../registration-agent-modal";
 
 interface IPeekOverviewProperties {
   workspaceSlug: string;
@@ -65,6 +71,11 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
   } = useIssueDetail();
   const { getStateById } = useProjectState();
   const { getUserDetails } = useMember();
+  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId);
+  const { isSentBackState } = useApprovalGateConfig(workspaceSlug, projectId);
+  // states
+  const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
+  const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
   // derived values
   const issue = getIssueById(issueId);
   if (!issue) return <></>;
@@ -86,7 +97,11 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
         <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
           <StateDropdown
             value={issue?.state_id}
-            onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val })}
+            onChange={(val) => {
+              if (val && isGatedState(val)) setPendingRegistrationStateId(val);
+              else if (val && isSentBackState(val)) setPendingSentBackStateId(val);
+              else issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
+            }}
             projectId={projectId}
             disabled={disabled}
             buttonVariant="transparent-with-text"
@@ -277,6 +292,37 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
           isPeekView
         />
       </div>
+
+      <RegistrationAgentModal
+        isOpen={!!pendingRegistrationStateId}
+        handleClose={() => setPendingRegistrationStateId(null)}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        eligibleAgentIds={eligibleAgentIds}
+        onSubmit={async (agentId) => {
+          if (!pendingRegistrationStateId) return;
+          await issueOperations.update(workspaceSlug, projectId, issueId, {
+            state_id: pendingRegistrationStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.registration_handoff).
+            registration_agent_id: agentId,
+          } as Partial<TIssue>);
+        }}
+      />
+
+      <ApprovalSentBackModal
+        isOpen={!!pendingSentBackStateId}
+        handleClose={() => setPendingSentBackStateId(null)}
+        onSubmit={async (commentHtml) => {
+          if (!pendingSentBackStateId) return;
+          await issueOperations.update(workspaceSlug, projectId, issueId, {
+            state_id: pendingSentBackStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.approval).
+            approval_comment_html: commentHtml,
+          } as Partial<TIssue>);
+        }}
+      />
     </div>
   );
 });

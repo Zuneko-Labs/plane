@@ -48,6 +48,9 @@ from .issue import (
     IssueRecurrence,
 )
 from .module import Module, ModuleIssue, ModuleLink, ModuleMember, ModuleUserProperties
+from .naming_rule import WorkItemNamingRule
+from .registration_handoff import RegistrationHandoffConfig
+from .approval_gate import ApprovalGateConfig, ApprovalRecord
 from .notification import EmailNotificationLog, Notification, UserNotificationPreference
 from .page import Page, PageLabel, PageLog, ProjectPage, PageVersion
 from .project import (

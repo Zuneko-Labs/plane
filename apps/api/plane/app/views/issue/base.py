@@ -42,17 +42,20 @@ from plane.app.serializers import (
     ProjectUserPropertySerializer,
     RecurrenceSerializer,
 )
-from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
+from plane.bgtasks.event_outbox import emit_delete_event, emit_event, emit_model_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
+from plane.bgtasks.notification_task import notify_pending_approval
 from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.bgtasks.webhook_task import model_activity
 from plane.db.models import (
+    ApprovalRecord,
     CycleIssue,
     FileAsset,
     IntakeIssue,
     Issue,
     IssueAssignee,
+    IssueComment,
     IssueLabel,
     IssueLink,
     IssueReaction,
@@ -74,7 +77,10 @@ from plane.utils.grouper import (
 )
 from plane.utils.host import base_host
 from plane.utils.issue_filters import issue_filters
+from plane.utils.approval import apply_approval_gate, resolve_gate_state_ids
+from plane.utils.naming_rules import validate_work_item_name
 from plane.utils.order_queryset import order_issue_queryset
+from plane.utils.registration_handoff import apply_registration_handoff
 from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
 from plane.utils.recurrence import add_interval, derive_days_of_month, next_month_day
 from plane.utils.timezone_converter import user_timezone_converter
@@ -439,6 +445,25 @@ class IssueViewSet(BaseViewSet):
     def create(self, request, slug, project_id):
         project = Project.objects.get(pk=project_id)
 
+        # A work item must always belong to exactly one module. Validate this
+        # before creating anything — covers the create modal, quick-add,
+        # sub-issue creation, and duplicate/"make a copy", which all funnel
+        # through this endpoint.
+        module_ids = request.data.get("module_ids", [])
+        if not isinstance(module_ids, list) or len(module_ids) != 1:
+            return Response(
+                {"error": "A work item must belong to exactly one module"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        module_id = module_ids[0]
+
+        # Work item names must follow the client's naming convention (the
+        # name is the folder name on their PC). Rule is looked up per
+        # project/module, stored in WorkItemNamingRule.
+        naming_error = validate_work_item_name(project_id, module_id, request.data.get("name"))
+        if naming_error:
+            return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueCreateSerializer(
             data=request.data,
             context={
@@ -455,6 +480,41 @@ class IssueViewSet(BaseViewSet):
                 # If a recurrence rule was supplied, persist it against this first
                 # occurrence. A daily Celery Beat task creates the rest.
                 self._create_recurrence(request, serializer.instance, project)
+
+                # Create the single module link for this issue, mirroring
+                # ModuleIssueViewSet.create_module_issues.
+                module_issue = ModuleIssue.objects.create(
+                    issue_id=serializer.instance.id,
+                    module_id=module_id,
+                    project_id=project_id,
+                    workspace_id=project.workspace_id,
+                    created_by=request.user,
+                    updated_by=request.user,
+                )
+                issue_activity.delay(
+                    type="module.activity.created",
+                    requested_data=json.dumps({"module_id": str(module_id)}),
+                    actor_id=str(request.user.id),
+                    issue_id=str(serializer.instance.id),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+                emit_event(
+                    workspace_id=project.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=module_issue.id,
+                    event_type="module_issue.created",
+                    actor_id=request.user.id,
+                    data={
+                        "id": str(module_issue.id),
+                        "module_id": str(module_id),
+                        "issue_id": str(serializer.instance.id),
+                    },
+                )
 
                 # Track the issue
                 issue_activity.delay(
@@ -731,11 +791,94 @@ class IssueViewSet(BaseViewSet):
 
         current_instance = json.dumps(IssueDetailSerializer(issue).data, cls=DjangoJSONEncoder)
 
+        # Moving into the configured registration state requires naming an
+        # eligible agent — checked (and, on success, merged into
+        # assignee_ids) before the requested_data snapshot below, so the
+        # existing assignee-notification pipeline picks the agent up too.
+        handoff_error = apply_registration_handoff(
+            project_id,
+            issue,
+            request.data.get("state_id"),
+            request.data,
+            agent_key="registration_agent_id",
+            assignee_key="assignee_ids",
+        )
+        if handoff_error:
+            return Response({"error": handoff_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Only a project approver may move a work item into the configured
+        # Approved or Sent Back state, and Sent Back requires a comment.
+        requested_state_id = request.data.get("state_id")
+        original_state_id = str(issue.state_id)
+        gate_pending_id, gate_approved_id, gate_sent_back_id = resolve_gate_state_ids(project_id)
+        gate_redirect_id, gate_error = apply_approval_gate(
+            project_id, issue, requested_state_id, request.data, request.user
+        )
+        if gate_error:
+            return Response({"error": gate_error}, status=status.HTTP_400_BAD_REQUEST)
+        if gate_redirect_id:
+            request.data["state_id"] = gate_redirect_id
+            requested_state_id = gate_redirect_id
+
+        # Entering Pending Approval notifies the project's approvers.
+        if (
+            gate_pending_id
+            and requested_state_id
+            and str(requested_state_id) == gate_pending_id
+            and str(requested_state_id) != original_state_id
+        ):
+            notify_pending_approval.delay(
+                issue_id=str(issue.id),
+                project_id=str(project_id),
+                actor_id=str(request.user.id),
+            )
+
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
+
+        # Renaming a work item must still satisfy its naming rule.
+        if "name" in request.data:
+            current_module_id = issue.module_ids[0] if issue.module_ids else None
+            naming_error = validate_work_item_name(project_id, current_module_id, request.data.get("name"))
+            if naming_error:
+                return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueCreateSerializer(issue, data=request.data, partial=True, context={"project_id": project_id})
         if serializer.is_valid():
             with transaction.atomic():
                 serializer.save()
+
+                # Sign-off register: written alongside the existing
+                # IssueActivity trail whenever a work item is Approved or
+                # Sent Back. The mandatory Sent Back comment is created here
+                # too, in the same transaction as the state change, so a
+                # failed save never leaves an orphan comment.
+                if requested_state_id and str(requested_state_id) != original_state_id:
+                    if gate_sent_back_id and str(requested_state_id) == gate_sent_back_id:
+                        comment_html = request.data.pop("approval_comment_html")
+                        IssueComment.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            comment_html=comment_html,
+                        )
+                        ApprovalRecord.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            decision=ApprovalRecord.Decision.SENT_BACK,
+                            comment=comment_html,
+                        )
+                    elif gate_approved_id and str(requested_state_id) == gate_approved_id:
+                        ApprovalRecord.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            decision=ApprovalRecord.Decision.APPROVED,
+                        )
+
                 # Check if the update is a migration description update
                 is_migration_description_update = skip_activity and is_description_update
                 # Log all the updates
@@ -786,7 +929,7 @@ class IssueViewSet(BaseViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    @allow_permission([ROLE.ADMIN], creator=True, model=Issue)
+    @allow_permission([ROLE.ADMIN])
     def destroy(self, request, slug, project_id, pk=None):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
 

@@ -221,6 +221,12 @@ export const coreRoutes: RouteConfigEntry[] = [
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/intake/page.tsx"
             ),
           ]),
+
+          // Approval Queue
+          route(
+            ":workspaceSlug/projects/:projectId/approvals",
+            "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/approvals/page.tsx"
+          ),
         ]),
 
         // Project Archives - Issues, Cycles, Modules

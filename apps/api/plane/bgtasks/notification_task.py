@@ -24,6 +24,7 @@ from plane.db.models import (
     UserNotificationPreference,
     ProjectMember,
 )
+from plane.utils.permissions.base import ROLE
 from django.db.models import Subquery
 
 # Third Party imports
@@ -184,6 +185,48 @@ def create_mention_notification(project, notification_comment, issue, actor_id, 
                 "new_identifier": (str(activity.get("new_identifier")) if activity.get("new_identifier") else None),
             },
         },
+    )
+
+
+@shared_task
+def notify_pending_approval(issue_id, project_id, actor_id):
+    """A work item entering the configured Pending Approval state needs the
+    project's approvers to know right away — they're the only ones who can
+    move it to Approved or Sent Back (see plane.utils.approval).
+    """
+    issue = Issue.objects.filter(pk=issue_id, project_id=project_id).first()
+    project = Project.objects.filter(pk=project_id).first()
+    if not issue or not project:
+        return
+
+    approver_ids = ProjectMember.objects.filter(
+        project_id=project_id,
+        role=ROLE.ADMIN.value,
+        is_active=True,
+    ).values_list("member_id", flat=True)
+
+    Notification.objects.bulk_create(
+        [
+            Notification(
+                workspace_id=project.workspace_id,
+                project_id=project_id,
+                sender="in_app:issue_activities:pending_approval",
+                triggered_by_id=actor_id,
+                receiver_id=approver_id,
+                entity_identifier=issue_id,
+                entity_name="issue",
+                title=f'"{issue.name}" is pending your approval',
+                data={
+                    "issue": {
+                        "id": str(issue_id),
+                        "name": issue.name,
+                    },
+                },
+            )
+            for approver_id in approver_ids
+            if str(approver_id) != str(actor_id)
+        ],
+        batch_size=100,
     )
 
 

@@ -4,9 +4,11 @@
  * See the LICENSE file for details.
  */
 
+import { useState } from "react";
 import { observer } from "mobx-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
+import type { TIssue } from "@plane/types";
 // ui
 import {
   CycleIcon,
@@ -35,6 +37,8 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
+import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
 // plane web components
 // components
 import { WorkItemAdditionalSidebarProperties } from "@/plane-web/components/issues/issue-details/additional-properties";
@@ -43,6 +47,8 @@ import { DateAlert } from "@/plane-web/components/issues/issue-details/sidebar/d
 import { TransferHopInfo } from "@/plane-web/components/issues/issue-details/sidebar/transfer-hop-info";
 import { IssueWorklogProperty } from "@/plane-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
+import { ApprovalSentBackModal } from "../approval-sent-back-modal";
+import { RegistrationAgentModal } from "../registration-agent-modal";
 import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";
 import { IssueModuleSelect } from "./module-select";
@@ -68,6 +74,10 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
   } = useIssueDetail();
   const { getUserDetails } = useMember();
   const { getStateById } = useProjectState();
+  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId);
+  const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
+  const { isSentBackState } = useApprovalGateConfig(workspaceSlug, projectId);
+  const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
   const issue = getIssueById(issueId);
   if (!issue) return <></>;
 
@@ -92,7 +102,11 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
               <StateDropdown
                 value={issue?.state_id}
-                onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val })}
+                onChange={(val) => {
+                  if (val && isGatedState(val)) setPendingRegistrationStateId(val);
+                  else if (val && isSentBackState(val)) setPendingSentBackStateId(val);
+                  else issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
+                }}
                 projectId={projectId?.toString() ?? ""}
                 disabled={!isEditable}
                 buttonVariant="transparent-with-text"
@@ -284,6 +298,37 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
           </div>
         </div>
       </div>
+
+      <RegistrationAgentModal
+        isOpen={!!pendingRegistrationStateId}
+        handleClose={() => setPendingRegistrationStateId(null)}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        eligibleAgentIds={eligibleAgentIds}
+        onSubmit={async (agentId) => {
+          if (!pendingRegistrationStateId) return;
+          await issueOperations.update(workspaceSlug, projectId, issueId, {
+            state_id: pendingRegistrationStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.registration_handoff).
+            registration_agent_id: agentId,
+          } as Partial<TIssue>);
+        }}
+      />
+
+      <ApprovalSentBackModal
+        isOpen={!!pendingSentBackStateId}
+        handleClose={() => setPendingSentBackStateId(null)}
+        onSubmit={async (commentHtml) => {
+          if (!pendingSentBackStateId) return;
+          await issueOperations.update(workspaceSlug, projectId, issueId, {
+            state_id: pendingSentBackStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.approval).
+            approval_comment_html: commentHtml,
+          } as Partial<TIssue>);
+        }}
+      />
     </>
   );
 });

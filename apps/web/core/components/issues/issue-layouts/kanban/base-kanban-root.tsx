@@ -127,7 +127,12 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
     EUserPermissionsLevel.PROJECT
   );
 
-  const handleOnDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by, sub_group_by);
+  const { handleOnDrop, registrationAgentModal, sentBackModal } = useGroupIssuesDragNDrop(
+    storeType,
+    orderBy,
+    group_by,
+    sub_group_by
+  );
 
   const canEditProperties = useCallback(
     (projectId: string | undefined) => {
@@ -242,6 +247,8 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
         onSubmit={handleDeleteIssue}
         isEpic={isEpic}
       />
+      {registrationAgentModal}
+      {sentBackModal}
       {/* drag and delete component */}
       <div
         className={`fixed left-1/2 -translate-x-1/2 ${

@@ -7,6 +7,7 @@
 import type { ReactNode } from "react";
 import { useRef, useState } from "react";
 import { observer } from "mobx-react";
+import { useParams } from "next/navigation";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
 // plane imports
@@ -20,6 +21,7 @@ import { DropdownButton } from "@/components/dropdowns/buttons";
 import { BUTTON_VARIANTS_WITH_TEXT } from "@/components/dropdowns/constants";
 import type { TDropdownProps } from "@/components/dropdowns/types";
 // hooks
+import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
 import { useDropdown } from "@/hooks/use-dropdown";
 // plane web imports
 import { StateOption } from "@/plane-web/components/workflow";
@@ -70,6 +72,7 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
     stateIds,
     tabIndex,
     value,
+    projectId,
   } = props;
   // refs
   const dropdownRef = useRef<HTMLDivElement | null>(null);
@@ -80,9 +83,19 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
   // states
   const [query, setQuery] = useState("");
   const [isOpen, setIsOpen] = useState(false);
+  // router params
+  const { workspaceSlug } = useParams();
   // store hooks
   const { t } = useTranslation();
-  const statesList = stateIds.map((stateId) => getStateById(stateId)).filter((state) => !!state);
+  const { isApprover, isApproverOnlyState } = useApprovalGateConfig(workspaceSlug?.toString(), projectId);
+  const statesList = stateIds
+    .map((stateId) => getStateById(stateId))
+    .filter((state) => !!state)
+    // Approved / Sent Back are a sign-off only the project approver may
+    // give — hidden here so non-approvers don't see a state they can't
+    // actually select (the server rejects it regardless, see
+    // plane.utils.approval).
+    .filter((state) => isApprover || !isApproverOnlyState(state?.id));
   const defaultState = statesList?.find((state) => state?.default);
   const stateValue = value ? value : showDefaultState ? defaultState?.id : undefined;
   // popper-js init

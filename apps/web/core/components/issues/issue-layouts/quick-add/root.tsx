@@ -17,6 +17,8 @@ import { PlusIcon } from "@plane/propel/icons";
 import { setPromiseToast } from "@plane/propel/toast";
 import type { IProject, TIssue, TIssueRecurrenceFrequency, EIssueLayoutTypes } from "@plane/types";
 import { cn, createIssuePayload } from "@plane/utils";
+// components
+import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
 // plane web imports
 import { QuickAddIssueFormRoot } from "@/plane-web/components/issues/quick-add";
 // local imports
@@ -75,6 +77,12 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   const [recurringFrequency, setRecurringFrequency] = useState<TIssueRecurrenceFrequency | "">("");
   // "N times per month" for monthly recurrences (semi-monthly)
   const [recurringTimesPerMonth, setRecurringTimesPerMonth] = useState<number>(1);
+  // the inline quick-add row has no room for a module picker, so when the
+  // typed work item would otherwise be created without a module (ticket B2:
+  // module is required on every work item), fall back to opening the full
+  // create modal - prefilled with the typed title - instead of creating it
+  // directly. That modal already enforces the required-module validation.
+  const [fallbackModalPrefillData, setFallbackModalPrefillData] = useState<Partial<TIssue> | undefined>(undefined);
   // form info
   const {
     reset,
@@ -128,6 +136,16 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
 
     setRecurringFrequency("");
     setRecurringTimesPerMonth(1);
+
+    // no module preloaded (e.g. not grouped/filtered by module) and no
+    // inline module picker in this row - open the full create modal so the
+    // user can pick a module before the work item is actually created.
+    const hasModule = !isEpic && Array.isArray(payload.module_ids) && payload.module_ids.length > 0;
+    if (!isEpic && !hasModule) {
+      setFallbackModalPrefillData(payload);
+      handleIsOpen(false);
+      return;
+    }
 
     if (quickAddCallback) {
       const quickAddPromise = quickAddCallback(projectId.toString(), { ...payload });
@@ -224,6 +242,13 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
             </button>
           )}
         </>
+      )}
+      {fallbackModalPrefillData && (
+        <CreateUpdateIssueModal
+          isOpen={!!fallbackModalPrefillData}
+          onClose={() => setFallbackModalPrefillData(undefined)}
+          data={fallbackModalPrefillData}
+        />
       )}
     </div>
   );

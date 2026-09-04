@@ -19,7 +19,7 @@ import { useUserPermissions } from "@/hooks/store/user";
 import { DeleteIssueModal } from "../../delete-issue-modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
-import { useArchivedIssueMenuItems } from "./helper";
+import { useArchivedIssueMenuItems, useIsWorkItemDeleteAllowed } from "./helper";
 
 export const ArchivedIssueQuickActions = observer(function ArchivedIssueQuickActions(props: IQuickActionProps) {
   const {
@@ -47,6 +47,8 @@ export const ArchivedIssueQuickActions = observer(function ArchivedIssueQuickAct
     allowPermissions([EUserPermissions.ADMIN, EUserPermissions.MEMBER], EUserPermissionsLevel.PROJECT) && !readOnly;
   const isRestoringAllowed =
     handleRestore && allowPermissions([EUserPermissions.ADMIN, EUserPermissions.MEMBER], EUserPermissionsLevel.PROJECT);
+  const isDeletingAllowed =
+    useIsWorkItemDeleteAllowed(workspaceSlug?.toString(), issue.project_id ?? undefined) && !readOnly;
 
   // Menu items and modals using helper
   const menuItemProps: MenuItemFactoryProps = {
@@ -54,7 +56,7 @@ export const ArchivedIssueQuickActions = observer(function ArchivedIssueQuickAct
     workspaceSlug: workspaceSlug?.toString(),
     activeLayout,
     isEditingAllowed,
-    isDeletingAllowed: isEditingAllowed,
+    isDeletingAllowed,
     isRestoringAllowed: !!isRestoringAllowed,
     setIssueToEdit: () => {},
     setCreateUpdateIssueModal: () => {},

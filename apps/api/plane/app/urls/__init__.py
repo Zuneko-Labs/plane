@@ -11,7 +11,10 @@ from .external import urlpatterns as external_urls
 from .intake import urlpatterns as intake_urls
 from .issue import urlpatterns as issue_urls
 from .module import urlpatterns as module_urls
+from .naming_rule import urlpatterns as naming_rule_urls
 from .notification import urlpatterns as notification_urls
+from .registration_handoff import urlpatterns as registration_handoff_urls
+from .approval_gate import urlpatterns as approval_gate_urls
 from .page import urlpatterns as page_urls
 from .project import urlpatterns as project_urls
 from .search import urlpatterns as search_urls
@@ -32,7 +35,10 @@ urlpatterns = [
     *intake_urls,
     *issue_urls,
     *module_urls,
+    *naming_rule_urls,
     *notification_urls,
+    *registration_handoff_urls,
+    *approval_gate_urls,
     *page_urls,
     *project_urls,
     *search_urls,

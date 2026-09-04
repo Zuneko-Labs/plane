@@ -66,6 +66,7 @@ from plane.app.permissions import (
 )
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
+    ApprovalRecord,
     Issue,
     IssueActivity,
     FileAsset,
@@ -73,10 +74,12 @@ from plane.db.models import (
     IssueLink,
     IssueRelation,
     Label,
+    ModuleIssue,
     Project,
     ProjectMember,
     CycleIssue,
     Workspace,
+    WorkspaceMember,
 )
 from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
@@ -85,12 +88,17 @@ from plane.utils.order_queryset import (
     ISSUE_ORDER_BY_ALLOWLIST,
     sanitize_order_by,
 )
+from plane.bgtasks.notification_task import notify_pending_approval
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
+from plane.utils.approval import apply_approval_gate, resolve_gate_state_ids
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
+from plane.utils.naming_rules import validate_work_item_name
+from plane.utils.registration_handoff import apply_registration_handoff
 from plane.bgtasks.event_outbox import (
     emit_delete_event,
+    emit_event,
     emit_model_event,
 )
 from plane.bgtasks.webhook_task import model_activity
@@ -444,6 +452,19 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         """
         project = Project.objects.get(pk=project_id)
 
+        # A work item must always belong to exactly one module.
+        module_ids = request.data.get("module_ids", [])
+        if not isinstance(module_ids, list) or len(module_ids) != 1:
+            return Response(
+                {"error": "A work item must belong to exactly one module"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        module_id = module_ids[0]
+
+        naming_error = validate_work_item_name(project_id, module_id, request.data.get("name"))
+        if naming_error:
+            return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueSerializer(
             data=request.data,
             context={
@@ -499,6 +520,41 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     epoch=int(timezone.now().timestamp()),
                     notification=True,
                     origin=base_host(request=request, is_app=True),
+                )
+
+                # Create the single module link for this issue, mirroring
+                # ModuleIssueViewSet.create_module_issues.
+                module_issue = ModuleIssue.objects.create(
+                    issue_id=serializer.data["id"],
+                    module_id=module_id,
+                    project_id=project_id,
+                    workspace_id=project.workspace_id,
+                    created_by=request.user,
+                    updated_by=request.user,
+                )
+                issue_activity.delay(
+                    type="module.activity.created",
+                    requested_data=json.dumps({"module_id": str(module_id)}),
+                    actor_id=str(request.user.id),
+                    issue_id=str(serializer.data["id"]),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+                emit_event(
+                    workspace_id=project.workspace_id,
+                    project_id=project_id,
+                    entity_type="module_issue",
+                    entity_id=module_issue.id,
+                    event_type="module_issue.created",
+                    actor_id=request.user.id,
+                    data={
+                        "id": str(module_issue.id),
+                        "module_id": str(module_id),
+                        "issue_id": str(serializer.data["id"]),
+                    },
                 )
 
                 emit_model_event(
@@ -816,7 +872,62 @@ class IssueDetailAPIEndpoint(BaseAPIView):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
         project = Project.objects.get(pk=project_id)
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
+
+        # Moving into the configured registration state requires naming an
+        # eligible agent — checked (and, on success, merged into
+        # assignees) before the requested_data snapshot below, so the
+        # existing assignee-notification pipeline picks the agent up too.
+        # This serializer's field is "state" (FK id), not "state_id".
+        handoff_error = apply_registration_handoff(
+            project_id,
+            issue,
+            request.data.get("state"),
+            request.data,
+            agent_key="registration_agent_id",
+            assignee_key="assignees",
+        )
+        if handoff_error:
+            return Response({"error": handoff_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Only a project approver may move a work item into the configured
+        # Approved or Sent Back state, and Sent Back requires a comment.
+        # This serializer's field is "state" (FK id), not "state_id".
+        requested_state_id = request.data.get("state")
+        original_state_id = str(issue.state_id)
+        gate_pending_id, gate_approved_id, gate_sent_back_id = resolve_gate_state_ids(project_id)
+        gate_redirect_id, gate_error = apply_approval_gate(
+            project_id, issue, requested_state_id, request.data, request.user
+        )
+        if gate_error:
+            return Response({"error": gate_error}, status=status.HTTP_400_BAD_REQUEST)
+        if gate_redirect_id:
+            request.data["state"] = gate_redirect_id
+            requested_state_id = gate_redirect_id
+
+        # Entering Pending Approval notifies the project's approvers.
+        if (
+            gate_pending_id
+            and requested_state_id
+            and str(requested_state_id) == gate_pending_id
+            and str(requested_state_id) != original_state_id
+        ):
+            notify_pending_approval.delay(
+                issue_id=str(issue.id),
+                project_id=str(project_id),
+                actor_id=str(request.user.id),
+            )
+
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
+
+        # Renaming a work item must still satisfy its naming rule.
+        if "name" in request.data:
+            current_module_id = (
+                ModuleIssue.objects.filter(project_id=project_id, issue_id=pk).values_list("module_id", flat=True).first()
+            )
+            naming_error = validate_work_item_name(project_id, current_module_id, request.data.get("name"))
+            if naming_error:
+                return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueSerializer(
             issue,
             data=request.data,
@@ -844,6 +955,39 @@ class IssueDetailAPIEndpoint(BaseAPIView):
 
             with transaction.atomic():
                 serializer.save()
+
+                # Sign-off register: written alongside the existing
+                # IssueActivity trail whenever a work item is Approved or
+                # Sent Back. The mandatory Sent Back comment is created here
+                # too, in the same transaction as the state change, so a
+                # failed save never leaves an orphan comment.
+                if requested_state_id and str(requested_state_id) != original_state_id:
+                    if gate_sent_back_id and str(requested_state_id) == gate_sent_back_id:
+                        comment_html = request.data.pop("approval_comment_html")
+                        IssueComment.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            comment_html=comment_html,
+                        )
+                        ApprovalRecord.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            decision=ApprovalRecord.Decision.SENT_BACK,
+                            comment=comment_html,
+                        )
+                    elif gate_approved_id and str(requested_state_id) == gate_approved_id:
+                        ApprovalRecord.objects.create(
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=issue.workspace_id,
+                            actor=request.user,
+                            decision=ApprovalRecord.Decision.APPROVED,
+                        )
+
                 issue_activity.delay(
                     type="issue.activity.updated",
                     requested_data=requested_data,
@@ -886,7 +1030,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
     @work_item_docs(
         operation_id="delete_work_item",
         summary="Delete work item",
-        description="Permanently delete an existing work item from the project. Only admins or the item creator can perform this action.",  # noqa: E501
+        description="Permanently delete an existing work item from the project. Only a project admin or workspace admin can perform this action.",  # noqa: E501
         parameters=[
             PROJECT_ID_PARAMETER,
         ],
@@ -900,20 +1044,25 @@ class IssueDetailAPIEndpoint(BaseAPIView):
         """Delete work item
 
         Permanently delete an existing work item from the project.
-        Only admins or the item creator can perform this action.
+        Only a project admin or workspace admin can perform this action.
         """
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
-        if issue.created_by_id != request.user.id and (
-            not ProjectMember.objects.filter(
-                workspace__slug=slug,
-                member=request.user,
-                role=20,
-                project_id=project_id,
-                is_active=True,
-            ).exists()
-        ):
+        is_project_admin = ProjectMember.objects.filter(
+            workspace__slug=slug,
+            member=request.user,
+            role=ROLE.ADMIN.value,
+            project_id=project_id,
+            is_active=True,
+        ).exists()
+        is_workspace_admin = WorkspaceMember.objects.filter(
+            workspace__slug=slug,
+            member=request.user,
+            role=ROLE.ADMIN.value,
+            is_active=True,
+        ).exists()
+        if not is_project_admin and not is_workspace_admin:
             return Response(
-                {"error": "Only admin or creator can delete the work item"},
+                {"error": "Only a project admin or workspace admin can delete the work item"},
                 status=status.HTTP_403_FORBIDDEN,
             )
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)

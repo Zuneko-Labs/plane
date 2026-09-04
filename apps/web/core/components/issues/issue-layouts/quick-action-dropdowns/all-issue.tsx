@@ -25,7 +25,7 @@ import { DeleteIssueModal } from "../../delete-issue-modal";
 import { CreateUpdateIssueModal } from "../../issue-modal/modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
-import { useAllIssueMenuItems } from "./helper";
+import { useAllIssueMenuItems, useIsWorkItemDeleteAllowed } from "./helper";
 
 export const AllIssueQuickActions = observer(function AllIssueQuickActions(props: IQuickActionProps) {
   const {
@@ -56,6 +56,8 @@ export const AllIssueQuickActions = observer(function AllIssueQuickActions(props
   // auth
   const isArchivingAllowed = handleArchive && isEditingAllowed;
   const isInArchivableGroup = !!stateDetails && ARCHIVABLE_STATE_GROUPS.includes(stateDetails?.group);
+  const isDeletingAllowed =
+    useIsWorkItemDeleteAllowed(workspaceSlug?.toString(), issue.project_id ?? undefined) && !readOnly;
 
   const duplicateIssuePayload = omit(
     {
@@ -74,7 +76,7 @@ export const AllIssueQuickActions = observer(function AllIssueQuickActions(props
     activeLayout: "Global issues",
     isEditingAllowed,
     isArchivingAllowed,
-    isDeletingAllowed: isEditingAllowed,
+    isDeletingAllowed,
     isInArchivableGroup,
     setIssueToEdit,
     setCreateUpdateIssueModal,

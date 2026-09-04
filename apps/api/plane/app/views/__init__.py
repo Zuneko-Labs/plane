@@ -191,6 +191,9 @@ from .estimate.base import (
     BulkEstimatePointEndpoint,
     EstimatePointEndpoint,
 )
+from .naming_rule import WorkItemNamingRuleViewSet
+from .registration_handoff import RegistrationHandoffConfigViewSet
+from .approval_gate import ApprovalGateConfigViewSet, ApprovalRecordListEndpoint
 
 from .intake.base import (
     IntakeViewSet,

@@ -36,6 +36,7 @@ from plane.db.models import (
     ProjectMember,
     ProjectNetwork,
     ProjectUserProperty,
+    RegistrationHandoffConfig,
     State,
     DEFAULT_STATES,
     Workspace,
@@ -281,7 +282,7 @@ class ProjectViewSet(BaseViewSet):
                         role=ROLE.ADMIN.value,
                     )
 
-                State.objects.bulk_create(
+                created_states = State.objects.bulk_create(
                     [
                         State(
                             name=state["name"],
@@ -296,6 +297,17 @@ class ProjectViewSet(BaseViewSet):
                         for state in DEFAULT_STATES
                     ]
                 )
+
+                # Registration handoff is on by default for every project, gated
+                # at the "Registration" state that DEFAULT_STATES always creates.
+                registration_state = next((s for s in created_states if s.name == "Registration"), None)
+                if registration_state is not None:
+                    RegistrationHandoffConfig.objects.create(
+                        project=serializer.instance,
+                        workspace_id=serializer.instance.workspace_id,
+                        trigger_state=registration_state,
+                        created_by=request.user,
+                    )
 
                 project = self.get_queryset().filter(pk=serializer.data["id"]).first()
 

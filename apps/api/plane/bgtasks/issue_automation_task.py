@@ -4,6 +4,7 @@
 
 # Python imports
 import json
+import logging
 from datetime import timedelta
 
 # Third party imports
@@ -15,8 +16,10 @@ from django.utils import timezone
 
 # Module imports
 from plane.bgtasks.issue_activities_task import issue_activity
-from plane.db.models import Issue, Project, State
+from plane.db.models import Issue, Project, RegistrationHandoffConfig, State
 from plane.utils.exception_logger import log_exception
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task
@@ -120,6 +123,19 @@ def close_old_issues():
                     close_state = State.objects.filter(group="cancelled").first()
                 else:
                     close_state = project.default_state
+
+                # This is a system task with no request/actor to name a
+                # registration agent, so it cannot legally move issues into
+                # a state that requires one. Skip rather than silently
+                # violate the rule.
+                if close_state and RegistrationHandoffConfig.objects.filter(trigger_state=close_state).exists():
+                    logger.warning(
+                        "Skipping close_old_issues for project %s: its close state %s requires a "
+                        "registration agent, which this automation cannot provide.",
+                        project.id,
+                        close_state.id,
+                    )
+                    continue
 
                 issues_to_update = []
                 for issue in issues:

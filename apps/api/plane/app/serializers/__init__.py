@@ -113,6 +113,10 @@ from .estimate import (
     WorkspaceEstimateSerializer,
 )
 
+from .naming_rule import WorkItemNamingRuleSerializer
+from .registration_handoff import RegistrationHandoffConfigSerializer
+from .approval_gate import ApprovalGateConfigSerializer, ApprovalRecordSerializer
+
 from .intake import (
     IntakeSerializer,
     IntakeIssueSerializer,

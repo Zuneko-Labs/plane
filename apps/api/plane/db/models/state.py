@@ -20,43 +20,74 @@ class StateGroup(models.TextChoices):
     TRIAGE = "triage", "Triage"
 
 
-# Default states
+# Default states — the client's own workflow for "all other projects" (see
+# the department-workflow Google Sheet); the other 4 department-specific
+# workflows are applied to matching existing projects via the
+# apply_department_workflows management command, not here.
 DEFAULT_STATES = [
     {
-        "name": "Backlog",
+        "name": "Drafting",
         "color": "#60646C",
         "sequence": 15000,
         "group": StateGroup.BACKLOG.value,
         "default": True,
     },
     {
-        "name": "Todo",
+        "name": "Invoice",
         "color": "#60646C",
         "sequence": 25000,
         "group": StateGroup.UNSTARTED.value,
     },
     {
-        "name": "In Progress",
+        "name": "Data Entry",
         "color": "#F59E0B",
         "sequence": 35000,
         "group": StateGroup.STARTED.value,
     },
     {
-        "name": "Done",
-        "color": "#46A758",
+        "name": "Challan + DHC",
+        "color": "#F59E0B",
         "sequence": 45000,
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "name": "Draft Approval",
+        "color": "#F59E0B",
+        "sequence": 55000,
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "name": "Registration",
+        "color": "#F59E0B",
+        "sequence": 65000,
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "name": "Xerox and Binding",
+        "color": "#F59E0B",
+        "sequence": 75000,
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "name": "Closed",
+        "color": "#46A758",
+        "sequence": 85000,
         "group": StateGroup.COMPLETED.value,
     },
     {
-        "name": "Cancelled",
-        "color": "#9AA4BC",
-        "sequence": 55000,
-        "group": StateGroup.CANCELLED.value,
+        "name": "Excel entry and Handover",
+        "color": "#46A758",
+        "sequence": 95000,
+        "group": StateGroup.COMPLETED.value,
     },
     {
+        # Not part of the client's visible workflow — kept because the
+        # Intake/triage feature (IntakeStateEndpoint, IssueCreateSerializer's
+        # allow_triage_state) hard-requires exactly one triage-group state
+        # per project to exist, with no auto-create fallback.
         "name": "Triage",
         "color": "#4E5355",
-        "sequence": 65000,
+        "sequence": 105000,
         "group": StateGroup.TRIAGE.value,
     },
 ]

@@ -7,14 +7,27 @@
 import { useMemo } from "react";
 import { XCircle, ArchiveRestoreIcon } from "lucide-react";
 // plane imports
+import { EUserPermissions, EUserPermissionsLevel } from "@plane/constants";
 import { useTranslation } from "@plane/i18n";
 import { LinkIcon, CopyIcon, NewTabIcon, EditIcon, ArchiveIcon, TrashIcon } from "@plane/propel/icons";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import type { EIssuesStoreType, TIssue } from "@plane/types";
 import type { TContextMenuItem } from "@plane/ui";
 import { copyUrlToClipboard, generateWorkItemLink } from "@plane/utils";
+// hooks
+import { useUserPermissions } from "@/hooks/store/user";
 // types
 import { createCopyMenuWithDuplication } from "@/plane-web/components/issues/issue-layouts/quick-action-dropdowns";
+
+// Cosmetic-only gate for the delete action: project admin, or workspace admin.
+// Real enforcement lives server-side (allow_permission([ROLE.ADMIN]) on the delete endpoints).
+export const useIsWorkItemDeleteAllowed = (workspaceSlug?: string, projectId?: string): boolean => {
+  const { allowPermissions } = useUserPermissions();
+  return (
+    allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId) ||
+    allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, workspaceSlug)
+  );
+};
 
 // Generic helper function to handle optional function calls gracefully
 // Overload for functions without parameters
