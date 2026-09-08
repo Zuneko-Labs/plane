@@ -25,7 +25,7 @@ import { DeleteIssueModal } from "../../delete-issue-modal";
 import { CreateUpdateIssueModal } from "../../issue-modal/modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
-import { useAllIssueMenuItems, useIsWorkItemDeleteAllowed } from "./helper";
+import { useAllIssueMenuItems, useIsWorkItemArchiveAllowed, useIsWorkItemDeleteAllowed } from "./helper";
 
 export const AllIssueQuickActions = observer(function AllIssueQuickActions(props: IQuickActionProps) {
   const {
@@ -54,7 +54,11 @@ export const AllIssueQuickActions = observer(function AllIssueQuickActions(props
   const isEditingAllowed = !readOnly;
   const projectIdentifier = getProjectIdentifierById(issue?.project_id);
   // auth
-  const isArchivingAllowed = handleArchive && isEditingAllowed;
+  const isArchiveOperationAllowed = useIsWorkItemArchiveAllowed(
+    workspaceSlug?.toString(),
+    issue.project_id ?? undefined
+  );
+  const isArchivingAllowed = handleArchive && isEditingAllowed && isArchiveOperationAllowed;
   const isInArchivableGroup = !!stateDetails && ARCHIVABLE_STATE_GROUPS.includes(stateDetails?.group);
   const isDeletingAllowed =
     useIsWorkItemDeleteAllowed(workspaceSlug?.toString(), issue.project_id ?? undefined) && !readOnly;

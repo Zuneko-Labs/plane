@@ -15,7 +15,16 @@ from unittest.mock import patch
 import pytest
 from rest_framework import status
 
-from plane.db.models import Issue, IssueAssignee, Project, ProjectMember, RegistrationHandoffConfig, State, User
+from plane.db.models import (
+    Issue,
+    IssueAssignee,
+    Project,
+    ProjectMember,
+    RegistrationHandoffConfig,
+    RegistrationHandoffRecord,
+    State,
+    User,
+)
 
 
 @pytest.fixture
@@ -158,3 +167,68 @@ class TestRegistrationHandoffOnStateTransition:
             response = session_client.patch(url, {"state_id": str(registration_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_200_OK, f"Got {response.status_code}: {response.data!r}"
+
+    @pytest.mark.django_db
+    def test_reentry_does_not_require_a_new_agent(
+        self,
+        session_client,
+        workspace,
+        project,
+        drafting_state,
+        registration_state,
+        drafter_issue,
+        handoff_config,
+        eligible_agent,
+    ):
+        """Naming an agent is a once-per-work-item step. Moving out of the
+        registration state and back in must NOT re-prompt — the same
+        physical person is still responsible for the sub-registrar trip.
+        """
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+
+        with patch("plane.app.views.issue.base.issue_activity"):
+            # first entry: agent named
+            first = session_client.patch(
+                url,
+                {"state_id": str(registration_state.id), "registration_agent_id": str(eligible_agent.id)},
+                format="json",
+            )
+            assert first.status_code == status.HTTP_200_OK, f"Got {first.status_code}: {first.data!r}"
+
+            # back out to drafting
+            out = session_client.patch(url, {"state_id": str(drafting_state.id)}, format="json")
+            assert out.status_code == status.HTTP_200_OK, f"Got {out.status_code}: {out.data!r}"
+
+            # re-entry with NO registration_agent_id - this used to 400
+            back = session_client.patch(url, {"state_id": str(registration_state.id)}, format="json")
+
+        assert back.status_code == status.HTTP_200_OK, f"Got {back.status_code}: {back.data!r}"
+        drafter_issue.refresh_from_db()
+        assert drafter_issue.state_id == registration_state.id
+
+        # the original agent is still on the item, and only one record exists
+        assignee_ids = set(IssueAssignee.objects.filter(issue=drafter_issue).values_list("assignee_id", flat=True))
+        assert eligible_agent.id in assignee_ids, "original agent must stay assigned on re-entry"
+        assert RegistrationHandoffRecord.objects.filter(issue=drafter_issue).count() == 1
+
+    @pytest.mark.django_db
+    def test_first_entry_still_requires_an_agent_after_other_transitions(
+        self,
+        session_client,
+        workspace,
+        project,
+        drafting_state,
+        registration_state,
+        drafter_issue,
+        handoff_config,
+    ):
+        """Unrelated state churn must not be mistaken for a prior handoff —
+        the gate still applies on the genuine first entry."""
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+
+        with patch("plane.app.views.issue.base.issue_activity"):
+            session_client.patch(url, {"state_id": str(drafting_state.id)}, format="json")
+            response = session_client.patch(url, {"state_id": str(registration_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        assert not RegistrationHandoffRecord.objects.filter(issue=drafter_issue).exists()

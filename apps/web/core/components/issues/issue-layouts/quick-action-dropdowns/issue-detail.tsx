@@ -28,7 +28,7 @@ import { DeleteIssueModal } from "../../delete-issue-modal";
 import { CreateUpdateIssueModal } from "../../issue-modal/modal";
 import type { IQuickActionProps } from "../list/list-view-types";
 import type { MenuItemFactoryProps } from "./helper";
-import { useIsWorkItemDeleteAllowed, useWorkItemDetailMenuItems } from "./helper";
+import { useIsWorkItemArchiveAllowed, useIsWorkItemDeleteAllowed, useWorkItemDetailMenuItems } from "./helper";
 import { IconButton } from "@plane/propel/icon-button";
 
 type TWorkItemDetailQuickActionProps = IQuickActionProps & {
@@ -84,7 +84,11 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
       issue.project_id ?? undefined
     ) && !readOnly;
 
-  const isArchivingAllowed = !issue.archived_at && isEditingAllowed;
+  const isArchiveOperationAllowed = useIsWorkItemArchiveAllowed(
+    workspaceSlug?.toString(),
+    issue.project_id ?? undefined
+  );
+  const isArchivingAllowed = !issue.archived_at && isEditingAllowed && isArchiveOperationAllowed;
   const isInArchivableGroup = !!stateDetails && ARCHIVABLE_STATE_GROUPS.includes(stateDetails?.group);
   const isRestoringAllowed = !!issue.archived_at && isEditingAllowed;
 
@@ -154,25 +158,13 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
 
   const MENU_ITEMS = baseMenuItems
     .map((item) => {
-      // Customize edit action for work item
+      // Edit is hidden in peek mode and when editing isn't allowed; copy
+      // link is hidden in peek mode. Mutating the freshly-built menu item
+      // in place avoids reallocating it on every render.
       if (item.key === "edit") {
-        return {
-          ...item,
-          shouldRender: isEditingAllowed && !isPeekMode,
-        };
-      }
-      // Customize delete action for work item
-      if (item.key === "delete") {
-        return {
-          ...item,
-        };
-      }
-      // Hide copy link in peek mode
-      if (item.key === "copy-link") {
-        return {
-          ...item,
-          shouldRender: !isPeekMode,
-        };
+        item.shouldRender = isEditingAllowed && !isPeekMode;
+      } else if (item.key === "copy-link") {
+        item.shouldRender = !isPeekMode;
       }
       return item;
     })
@@ -181,13 +173,11 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     });
 
   const CONTEXT_MENU_ITEMS = MENU_ITEMS.map(function CONTEXT_MENU_ITEMS(item) {
-    return {
-      ...item,
-
+    return Object.assign({}, item, {
       onClick: () => {
         item.action();
       },
-    };
+    });
   });
 
   return (

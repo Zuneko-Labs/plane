@@ -72,6 +72,7 @@ from plane.db.models import (
 from plane.utils.filters import ComplexFilterBackend, IssueFilterSet
 from plane.utils.global_paginator import paginate
 from plane.utils.grouper import (
+    has_registration_handoff_expression,
     issue_group_values,
     issue_on_results,
     issue_queryset_grouper,
@@ -172,7 +173,9 @@ class IssueListEndpoint(BaseAPIView):
         if self.fields or self.expand:
             issues = IssueSerializer(issue_queryset, many=True, fields=self.fields, expand=self.expand).data
         else:
-            issues = issue_queryset.values(
+            issues = issue_queryset.annotate(
+                has_registration_handoff=has_registration_handoff_expression()
+            ).values(
                 "id",
                 "name",
                 "state_id",
@@ -199,6 +202,9 @@ class IssueListEndpoint(BaseAPIView):
                 "is_draft",
                 "archived_at",
                 "deleted_at",
+                # Needed so an already-handed-off item doesn't re-prompt for
+                # an agent after a fresh page load.
+                "has_registration_handoff",
             )
             datetime_fields = ["created_at", "updated_at"]
             issues = user_timezone_converter(issues, datetime_fields, request.user.user_timezone)

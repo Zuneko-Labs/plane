@@ -42,6 +42,7 @@ from plane.db.models import (
     IssueDescriptionVersion,
     ProjectMember,
     EstimatePoint,
+    RegistrationHandoffRecord,
 )
 from plane.utils.content_validator import (
     validate_html_content,
@@ -948,12 +949,25 @@ class IssueDetailSerializer(IssueSerializer):
     description_html = serializers.CharField()
     is_subscribed = serializers.BooleanField(read_only=True)
     is_intake = serializers.BooleanField(read_only=True)
+    # True once this work item has been handed off to a registration agent.
+    # The UI uses it to skip the agent modal on re-entry into the
+    # registration state (see plane.utils.registration_handoff).
+    has_registration_handoff = serializers.SerializerMethodField(read_only=True)
+
+    def get_has_registration_handoff(self, obj) -> bool:
+        # Prefer the queryset annotation where the view provides one; fall
+        # back to the relation for callers that serialize a bare instance.
+        annotated = getattr(obj, "has_registration_handoff_annotated", None)
+        if annotated is not None:
+            return bool(annotated)
+        return RegistrationHandoffRecord.objects.filter(issue_id=obj.id).exists()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
             "description_html",
             "is_subscribed",
             "is_intake",
+            "has_registration_handoff",
         ]
         read_only_fields = fields
 

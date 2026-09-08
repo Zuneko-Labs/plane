@@ -35,3 +35,34 @@ class RegistrationHandoffConfig(ProjectBaseModel):
         verbose_name_plural = "Registration Handoff Configs"
         db_table = "registration_handoff_configs"
         ordering = ("project",)
+
+
+class RegistrationHandoffRecord(ProjectBaseModel):
+    """Written the first time a work item enters the configured registration
+    state with a named agent.
+
+    Its existence is what makes the handoff a once-only prompt: the gate in
+    plane.utils.registration_handoff asks for an agent only when no record
+    exists yet, so a work item that leaves the registration state and later
+    comes back keeps the agent it was already given instead of re-prompting.
+    """
+
+    issue = models.OneToOneField(
+        "db.Issue",
+        on_delete=models.CASCADE,
+        related_name="registration_handoff_record",
+    )
+    agent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    def __str__(self):
+        return f"{self.issue_id} -> {self.agent_id}"
+
+    class Meta:
+        verbose_name = "Registration Handoff Record"
+        verbose_name_plural = "Registration Handoff Records"
+        db_table = "registration_handoff_records"
+        ordering = ("-created_at",)

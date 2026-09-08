@@ -98,7 +98,9 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
           <StateDropdown
             value={issue?.state_id}
             onChange={(val) => {
-              if (val && isGatedState(val)) setPendingRegistrationStateId(val);
+              // Only the first handoff needs an agent; a work item that
+              // already has one keeps it on re-entry.
+              if (val && isGatedState(val) && !issue.has_registration_handoff) setPendingRegistrationStateId(val);
               else if (val && isSentBackState(val)) setPendingSentBackStateId(val);
               else issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
             }}
@@ -306,6 +308,10 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
             // Not a TIssue field — a one-shot instruction the backend reads
             // off the raw request body (see plane.utils.registration_handoff).
             registration_agent_id: agentId,
+            // The PATCH returns 204 with no body, and the store only applies
+            // the keys we send — so mirror the record the server just wrote,
+            // otherwise the next state change re-prompts for an agent.
+            has_registration_handoff: true,
           } as Partial<TIssue>);
         }}
       />

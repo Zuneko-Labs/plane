@@ -5,7 +5,7 @@
 # Django imports
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
-from django.db.models import Q, UUIDField, Value, QuerySet, OuterRef, Subquery
+from django.db.models import Exists, Q, UUIDField, Value, QuerySet, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 
 # Module imports
@@ -16,6 +16,7 @@ from plane.db.models import (
     Module,
     Project,
     ProjectMember,
+    RegistrationHandoffRecord,
     State,
     WorkspaceMember,
     IssueAssignee,
@@ -90,6 +91,13 @@ def issue_queryset_grouper(
     return queryset.annotate(**default_annotations)
 
 
+def has_registration_handoff_expression():
+    """Whether the work item already has a registration agent on record —
+    an Exists subquery so grouped board payloads stay one query instead of
+    one per card."""
+    return Exists(RegistrationHandoffRecord.objects.filter(issue_id=OuterRef("pk")))
+
+
 def issue_on_results(
     issues: QuerySet[Issue],
     group_by: Optional[str],
@@ -127,6 +135,10 @@ def issue_on_results(
         "is_draft",
         "archived_at",
         "state__group",
+        # Set once the item has been handed off to a registration agent, so
+        # the board can skip the agent modal on re-entry into the
+        # registration state (see plane.utils.registration_handoff).
+        "has_registration_handoff",
     ]
 
     if group_by in FIELD_MAPPER:
@@ -138,7 +150,7 @@ def issue_on_results(
         original_list.append(sub_group_by)
 
     required_fields.extend(original_list)
-    return list(issues.values(*required_fields))
+    return list(issues.annotate(has_registration_handoff=has_registration_handoff_expression()).values(*required_fields))
 
 
 def issue_group_values(

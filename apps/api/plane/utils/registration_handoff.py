@@ -16,7 +16,12 @@ this rule.
 """
 
 from plane.bgtasks.registration_handoff_task import send_registration_agent_email
-from plane.db.models import IssueAssignee, ProjectMember, RegistrationHandoffConfig
+from plane.db.models import (
+    IssueAssignee,
+    ProjectMember,
+    RegistrationHandoffConfig,
+    RegistrationHandoffRecord,
+)
 
 
 def get_registration_handoff_config(project_id):
@@ -35,6 +40,14 @@ def apply_registration_handoff(project_id, issue, requested_state_id, mutable_re
     agent alongside the issue's existing assignees, so the caller's existing
     assignee-diff notification pipeline picks up the new agent for free and
     nobody already assigned (e.g. the drafter) gets dropped.
+
+    Naming an agent is required only the FIRST time a work item enters the
+    configured state. A work item that has already been handed off carries a
+    RegistrationHandoffRecord, and moving it out and back in reuses that
+    agent rather than prompting again — the physical person responsible for
+    the sub-registrar trip doesn't change just because the item bounced
+    through another state. The agent is still re-notified on every entry,
+    since each entry is a fresh call to act.
     """
     if not requested_state_id:
         return None
@@ -45,6 +58,13 @@ def apply_registration_handoff(project_id, issue, requested_state_id, mutable_re
 
     config = get_registration_handoff_config(project_id)
     if config is None or requested_state_id != str(config.trigger_state_id):
+        return None
+
+    # Already handed off once: reuse the agent already on record instead of
+    # demanding a new one on every re-entry.
+    existing_record = RegistrationHandoffRecord.objects.filter(issue_id=issue.id).first()
+    if existing_record is not None:
+        _assign_and_notify(issue, mutable_request_data, assignee_key, str(existing_record.agent_id))
         return None
 
     agent_id = mutable_request_data.get(agent_key)
@@ -66,10 +86,22 @@ def apply_registration_handoff(project_id, issue, requested_state_id, mutable_re
             f"({agent_key})."
         )
 
+    RegistrationHandoffRecord.objects.create(
+        issue_id=issue.id,
+        project_id=project_id,
+        workspace_id=issue.workspace_id,
+        agent_id=agent_id,
+    )
+    _assign_and_notify(issue, mutable_request_data, assignee_key, str(agent_id))
+    return None
+
+
+def _assign_and_notify(issue, mutable_request_data, assignee_key, agent_id):
+    """Merge the agent into the issue's assignees (never replacing existing
+    ones) and notify them that the item is in registration again."""
     existing_assignee_ids = {
         str(uid)
         for uid in IssueAssignee.objects.filter(issue_id=issue.id).values_list("assignee_id", flat=True)
     }
-    mutable_request_data[assignee_key] = list(existing_assignee_ids | {str(agent_id)})
-    send_registration_agent_email.delay(issue_id=issue.id, agent_id=str(agent_id))
-    return None
+    mutable_request_data[assignee_key] = list(existing_assignee_ids | {agent_id})
+    send_registration_agent_email.delay(issue_id=issue.id, agent_id=agent_id)

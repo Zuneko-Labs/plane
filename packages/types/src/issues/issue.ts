@@ -77,6 +77,10 @@ export type TBaseIssue = {
   is_draft: boolean;
   is_epic?: boolean;
   is_intake?: boolean;
+  // True once a registration agent has been named on this work item. The
+  // agent modal is only shown on the FIRST entry into the registration
+  // state, so re-entry reuses the agent already on record.
+  has_registration_handoff?: boolean;
 };
 
 type IssueRelation = {

@@ -132,18 +132,29 @@ export const useGroupIssuesDragNDrop = (
         .fetchConfig(workspaceSlug.toString(), projectId)
         .catch(() => undefined);
       const config = configs?.[0];
-      if (config && config.trigger_state_id === stateId) {
+      // Only the first entry into the registration state needs an agent —
+      // an item already handed off keeps the agent it was given.
+      const alreadyHandedOff = !!getIssueById(issueId)?.has_registration_handoff;
+      if (config && config.trigger_state_id === stateId && !alreadyHandedOff) {
         setPendingRegistrationDrop({ projectId, issueId, data, eligibleAgentIds: config.eligible_agent_ids });
         return;
       }
 
-      const approvalConfigs = await approvalGateService.fetchConfig(workspaceSlug.toString(), projectId).catch(() => undefined);
+      const approvalConfigs = await approvalGateService
+        .fetchConfig(workspaceSlug.toString(), projectId)
+        .catch(() => undefined);
       const approvalConfig = approvalConfigs?.[0];
       const isGatedTarget =
-        !!approvalConfig && (stateId === approvalConfig.approved_state_id || stateId === approvalConfig.sent_back_state_id);
+        !!approvalConfig &&
+        (stateId === approvalConfig.approved_state_id || stateId === approvalConfig.sent_back_state_id);
 
       if (isGatedTarget) {
-        const isApprover = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug.toString(), projectId);
+        const isApprover = allowPermissions(
+          [EUserPermissions.ADMIN],
+          EUserPermissionsLevel.PROJECT,
+          workspaceSlug.toString(),
+          projectId
+        );
         if (!isApprover) {
           // A member can't decide Approved/Sent Back themselves — their
           // drop still succeeds, it just lands in Pending Approval and
@@ -176,10 +187,11 @@ export const useGroupIssuesDragNDrop = (
       }
     }
 
-    updateIssue &&
+    if (updateIssue) {
       updateIssue(projectId, issueId, data).catch((err) =>
         setToast({ ...errorToastProps, message: err?.error ?? err?.detail ?? errorToastProps.message })
       );
+    }
   };
 
   const handleOnDrop = async (source: GroupDropLocation, destination: GroupDropLocation) => {
@@ -219,7 +231,14 @@ export const useGroupIssuesDragNDrop = (
       onSubmit={async (agentId) => {
         if (!pendingRegistrationDrop || !updateIssue) return;
         const { projectId, issueId, data } = pendingRegistrationDrop;
-        await updateIssue(projectId, issueId, { ...data, registration_agent_id: agentId } as Partial<TIssue>);
+        await updateIssue(projectId, issueId, {
+          ...data,
+          registration_agent_id: agentId,
+          // The PATCH returns 204 with no body, and the store only applies
+          // the keys we send — so mirror the record the server just wrote,
+          // otherwise the next state change re-prompts for an agent.
+          has_registration_handoff: true,
+        } as Partial<TIssue>);
         setPendingRegistrationDrop(null);
       }}
     />
