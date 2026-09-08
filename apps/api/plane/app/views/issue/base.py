@@ -63,6 +63,7 @@ from plane.db.models import (
     IssueRelation,
     IssueSubscriber,
     ProjectUserProperty,
+    Module,
     ModuleIssue,
     Project,
     ProjectMember,
@@ -502,6 +503,16 @@ class IssueViewSet(BaseViewSet):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
+                # The module name is a billing key for downstream consumers
+                # (a module maps 1:1 to one builder's hours), so carry it —
+                # and the work item title — on the link event itself. That
+                # makes this event self-sufficient: a consumer deciding a
+                # per-module naming convention needs no follow-up call, and
+                # no correlation with the separate `issue.created` event
+                # (whose dispatch order relative to this one is not
+                # guaranteed — see event_outbox.py's two dispatch paths).
+                module_name = Module.objects.filter(pk=module_id).values_list("name", flat=True).first()
+
                 emit_event(
                     workspace_id=project.workspace_id,
                     project_id=project_id,
@@ -509,10 +520,15 @@ class IssueViewSet(BaseViewSet):
                     entity_id=module_issue.id,
                     event_type="module_issue.created",
                     actor_id=request.user.id,
+                    # Deliberately not a top-level "name" key: the events API
+                    # derives each event's `entity_name` from data["name"],
+                    # and this event's entity is the link, not the work item.
                     data={
                         "id": str(module_issue.id),
                         "module_id": str(module_id),
                         "issue_id": str(serializer.instance.id),
+                        "issue_name": serializer.instance.name,
+                        "module_name": module_name,
                     },
                 )
 
@@ -569,6 +585,13 @@ class IssueViewSet(BaseViewSet):
                 datetime_fields = ["created_at", "updated_at"]
                 issue = user_timezone_converter(issue, datetime_fields, request.user.user_timezone)
 
+                # NOTE: this payload's shape differs from the v1 API's
+                # `issue.created` — passing `instance=` serializes without an
+                # expand context, so labels/assignees are bare UUID strings
+                # here and nested dicts there. Its `module` field is also
+                # unreliable (it sources through a plural reverse relation),
+                # so `module_issue.created` above — not this event — is the
+                # authoritative source for work item title plus module.
                 emit_model_event(
                     model_name="issue",
                     model_id=str(serializer.data["id"]),

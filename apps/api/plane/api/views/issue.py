@@ -74,6 +74,7 @@ from plane.db.models import (
     IssueLink,
     IssueRelation,
     Label,
+    Module,
     ModuleIssue,
     Project,
     ProjectMember,
@@ -543,6 +544,16 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     notification=True,
                     origin=base_host(request=request, is_app=True),
                 )
+                # The module name is a billing key for downstream consumers
+                # (a module maps 1:1 to one builder's hours), so carry it —
+                # and the work item title — on the link event itself. That
+                # makes this event self-sufficient: a consumer deciding a
+                # per-module naming convention needs no follow-up call, and
+                # no correlation with the separate `issue.created` event
+                # (whose dispatch order relative to this one is not
+                # guaranteed — see event_outbox.py's two dispatch paths).
+                module_name = Module.objects.filter(pk=module_id).values_list("name", flat=True).first()
+
                 emit_event(
                     workspace_id=project.workspace_id,
                     project_id=project_id,
@@ -550,13 +561,26 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     entity_id=module_issue.id,
                     event_type="module_issue.created",
                     actor_id=request.user.id,
+                    # Deliberately not a top-level "name" key: the events API
+                    # derives each event's `entity_name` from data["name"],
+                    # and this event's entity is the link, not the work item.
                     data={
                         "id": str(module_issue.id),
                         "module_id": str(module_id),
                         "issue_id": str(serializer.data["id"]),
+                        "issue_name": issue.name,
+                        "module_name": module_name,
                     },
                 )
 
+                # NOTE: this payload's shape differs from the app API's
+                # `issue.created` — passing no `instance=` sends
+                # _get_model_data down the get_model_data path, which adds an
+                # expand context, so labels/assignees are nested dicts here
+                # and bare UUID strings there. Its `module` field is also
+                # unreliable (it sources through a plural reverse relation),
+                # so `module_issue.created` above — not this event — is the
+                # authoritative source for work item title plus module.
                 emit_model_event(
                     model_name="issue",
                     model_id=str(serializer.data["id"]),
