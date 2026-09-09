@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { createInstance } from "i18next";
+import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import ICU from "i18next-icu";
 import resourcesToBackend from "i18next-resources-to-backend";
@@ -13,22 +13,27 @@ import { NAMESPACES, DEFAULT_NAMESPACE } from "../constants/namespaces";
 
 import type { i18n as I18nInstance } from "i18next";
 
-export const i18nInstance: I18nInstance = createInstance();
+export const i18nInstance: I18nInstance = i18n.createInstance();
 
-// Resolved relative to this module's own location (not process.cwd()) so it works
-// whether i18next is running against src/ (dev watch) or the bundled dist/ output —
-// the dynamic import below is a non-static template literal, so bundlers can't inline
-// the JSON and the path must resolve correctly at runtime relative to wherever this
-// file ends up on disk. The build copies src/locales -> dist/locales to match.
-const localesBaseUrl = new URL("./locales/", import.meta.url);
+// Locale JSON ships as static assets alongside the bundled chunk, so the base URL
+// is resolved from the module URL at runtime.
+const LOCALES_BASE_URL = new URL("./locales/", import.meta.url);
 
 i18nInstance
   .use(ICU)
   .use(initReactI18next)
   .use(
-    resourcesToBackend(
-      (language: string, namespace: string) => import(new URL(`${language}/${namespace}.json`, localesBaseUrl).href)
-    )
+    resourcesToBackend(async (language: string, namespace: string) => {
+      // Fetched rather than dynamically imported: the bundler leaves this path to be
+      // resolved at runtime, and browsers refuse to execute a JSON response as an ES
+      // module without an import attribute. That rejection is swallowed by the
+      // backend, leaving i18next with no resources and rendering raw keys.
+      const response = await fetch(new URL(`${language}/${namespace}.json`, LOCALES_BASE_URL).href);
+      if (!response.ok) {
+        throw new Error(`Failed to load locale ${language}/${namespace}: ${response.status}`);
+      }
+      return response.json();
+    })
   );
 
 const initialLng =
