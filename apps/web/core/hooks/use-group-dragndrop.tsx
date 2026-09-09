@@ -15,6 +15,7 @@ import { RegistrationAgentModal } from "@/components/issues/registration-agent-m
 import approvalGateService from "@/services/approval-gate.service";
 import registrationHandoffService from "@/services/registration-handoff.service";
 import { ISSUE_FILTER_DEFAULT_DATA } from "@/store/issue/helpers/base-issues.store";
+import { SENT_FOR_APPROVAL_TOAST } from "./use-approval-gate-config";
 import { useIssueDetail } from "./store/use-issue-detail";
 import { useIssues } from "./store/use-issues";
 import { useIssuesActions } from "./use-issues-actions";
@@ -144,46 +145,64 @@ export const useGroupIssuesDragNDrop = (
         .fetchConfig(workspaceSlug.toString(), projectId)
         .catch(() => undefined);
       const approvalConfig = approvalConfigs?.[0];
-      const isGatedTarget =
-        !!approvalConfig &&
-        (stateId === approvalConfig.approved_state_id || stateId === approvalConfig.sent_back_state_id);
+      const isGateOn = !!approvalConfig && (approvalConfig.is_enabled ?? true);
+      const fromStateId = getIssueById(issueId)?.state_id;
+      const isApprover = allowPermissions(
+        [EUserPermissions.ADMIN],
+        EUserPermissionsLevel.PROJECT,
+        workspaceSlug.toString(),
+        projectId
+      );
 
-      if (isGatedTarget) {
-        const isApprover = allowPermissions(
-          [EUserPermissions.ADMIN],
-          EUserPermissionsLevel.PROJECT,
-          workspaceSlug.toString(),
-          projectId
-        );
+      // Only Approved is approver-only to enter. The Sent Back state is an
+      // ordinary workflow stage ("Xerox and Binding" by default) that work
+      // items pass through going forward, so dropping onto that column is
+      // a normal move — never redirected (see plane.utils.approval).
+      if (isGateOn && !!approvalConfig.approved_state_id && stateId === approvalConfig.approved_state_id) {
         if (!isApprover) {
-          // A member can't decide Approved/Sent Back themselves — their
-          // drop still succeeds, it just lands in Pending Approval and
-          // notifies the project's approvers instead (the server applies
-          // this same redirect regardless, see plane.utils.approval; doing
-          // it here too means the card lands in the right column
-          // immediately instead of flashing into a state it'll get
-          // corrected out of).
-          if (approvalConfig?.pending_approval_state_id) {
+          // A member can't decide Approved themselves — their drop still
+          // succeeds, it just lands in Pending Approval and notifies the
+          // project's approvers instead (the server applies this same
+          // redirect regardless; doing it here too means the card lands in
+          // the right column immediately instead of flashing into a state
+          // it'll get corrected out of).
+          if (approvalConfig.pending_approval_state_id) {
             data.state_id = approvalConfig.pending_approval_state_id;
-            setToast({
-              type: TOAST_TYPE.INFO,
-              title: "Sent for approval",
-              message: "A project approver will review this work item.",
-            });
           } else {
             setToast({
               type: TOAST_TYPE.ERROR,
               title: "Not allowed",
-              message: 'Only a project approver can move a work item to "Approved" or "Sent Back".',
+              message: 'Only a project approver can move a work item to "Approved".',
             });
             return;
           }
         }
       }
 
-      if (approvalConfig && approvalConfig.sent_back_state_id === data.state_id) {
+      // Ask for a reason only for an actual rejection — an approver
+      // dragging a work item back out of Pending Approval into Sent Back.
+      if (
+        isGateOn &&
+        isApprover &&
+        !!approvalConfig.sent_back_state_id &&
+        !!approvalConfig.pending_approval_state_id &&
+        data.state_id === approvalConfig.sent_back_state_id &&
+        fromStateId === approvalConfig.pending_approval_state_id
+      ) {
         setPendingSentBackDrop({ projectId, issueId, data });
         return;
+      }
+
+      // Landing in Pending Approval — whether dropped there directly or
+      // redirected out of Approved above — is what submits a work item for
+      // sign-off, so say so either way.
+      if (
+        isGateOn &&
+        !!approvalConfig.pending_approval_state_id &&
+        data.state_id === approvalConfig.pending_approval_state_id &&
+        fromStateId !== approvalConfig.pending_approval_state_id
+      ) {
+        setToast(SENT_FOR_APPROVAL_TOAST);
       }
     }
 

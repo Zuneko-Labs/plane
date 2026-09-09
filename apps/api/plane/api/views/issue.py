@@ -92,7 +92,7 @@ from plane.utils.order_queryset import (
 from plane.bgtasks.notification_task import notify_pending_approval
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
-from plane.utils.approval import apply_approval_gate, resolve_gate_state_ids
+from plane.utils.approval import apply_approval_gate, is_send_back_transition, resolve_gate_state_ids
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
 from plane.utils.naming_rules import validate_work_item_name
@@ -914,7 +914,8 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             return Response({"error": handoff_error}, status=status.HTTP_400_BAD_REQUEST)
 
         # Only a project approver may move a work item into the configured
-        # Approved or Sent Back state, and Sent Back requires a comment.
+        # Approved state, and only an approver bouncing one back out of
+        # Pending Approval counts as a Sent Back (which requires a comment).
         # This serializer's field is "state" (FK id), not "state_id".
         requested_state_id = request.data.get("state")
         original_state_id = str(issue.state_id)
@@ -986,8 +987,17 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 # too, in the same transaction as the state change, so a
                 # failed save never leaves an orphan comment.
                 if requested_state_id and str(requested_state_id) != original_state_id:
-                    if gate_sent_back_id and str(requested_state_id) == gate_sent_back_id:
-                        comment_html = request.data.pop("approval_comment_html")
+                    # Only an approver's rejection out of Pending Approval is
+                    # a Sent Back — a normal move into that stage carries no
+                    # comment and is not a sign-off (see
+                    # plane.utils.approval.is_send_back_transition).
+                    comment_html = request.data.pop("approval_comment_html", None)
+                    if (
+                        is_send_back_transition(
+                            original_state_id, requested_state_id, gate_pending_id, gate_sent_back_id
+                        )
+                        and comment_html
+                    ):
                         IssueComment.objects.create(
                             issue=issue,
                             project_id=project_id,

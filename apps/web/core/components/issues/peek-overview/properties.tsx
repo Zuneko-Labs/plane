@@ -22,6 +22,7 @@ import {
   EstimatePropertyIcon,
   ParentPropertyIcon,
 } from "@plane/propel/icons";
+import { setToast } from "@plane/propel/toast";
 import type { TIssue } from "@plane/types";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@plane/utils";
 // components
@@ -37,7 +38,7 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
-import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import { useApprovalGateConfig, SENT_FOR_APPROVAL_TOAST } from "@/hooks/use-approval-gate-config";
 import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
 // plane web components
 import { WorkItemAdditionalSidebarProperties } from "@/plane-web/components/issues/issue-details/additional-properties";
@@ -72,7 +73,7 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
   const { getStateById } = useProjectState();
   const { getUserDetails } = useMember();
   const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId);
-  const { isSentBackState } = useApprovalGateConfig(workspaceSlug, projectId);
+  const { isSentBackTransition, isSendForApprovalTransition } = useApprovalGateConfig(workspaceSlug, projectId);
   // states
   const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
   const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
@@ -101,8 +102,12 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
               // Only the first handoff needs an agent; a work item that
               // already has one keeps it on re-entry.
               if (val && isGatedState(val) && !issue.has_registration_handoff) setPendingRegistrationStateId(val);
-              else if (val && isSentBackState(val)) setPendingSentBackStateId(val);
-              else issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
+              else if (val && isSentBackTransition(issue?.state_id, val)) setPendingSentBackStateId(val);
+              else {
+                const sendsForApproval = isSendForApprovalTransition(issue?.state_id, val);
+                issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
+                if (sendsForApproval) setToast(SENT_FOR_APPROVAL_TOAST);
+              }
             }}
             projectId={projectId}
             disabled={disabled}

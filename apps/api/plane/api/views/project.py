@@ -23,6 +23,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 # Module imports
 from plane.db.models import (
+    ApprovalGateConfig,
     Cycle,
     Intake,
     Module,
@@ -32,6 +33,7 @@ from plane.db.models import (
     RegistrationHandoffConfig,
     State,
     DEFAULT_STATES,
+    DEFAULT_APPROVAL_GATE_STATES,
     Workspace,
     UserFavorite,
     Label,
@@ -289,6 +291,20 @@ class ProjectListCreateAPIEndpoint(BaseAPIView):
                             trigger_state=registration_state,
                             created_by=request.user,
                         )
+
+                    # Handover approval gate is on by default for every
+                    # project too, mapped over the same default states (see
+                    # plane.utils.approval and DEFAULT_APPROVAL_GATE_STATES).
+                    states_by_name = {s.name: s for s in created_states}
+                    ApprovalGateConfig.objects.create(
+                        project=serializer.instance,
+                        workspace_id=serializer.instance.workspace_id,
+                        is_enabled=True,
+                        pending_approval_state=states_by_name.get(DEFAULT_APPROVAL_GATE_STATES["pending_approval"]),
+                        approved_state=states_by_name.get(DEFAULT_APPROVAL_GATE_STATES["approved"]),
+                        sent_back_state=states_by_name.get(DEFAULT_APPROVAL_GATE_STATES["sent_back"]),
+                        created_by=request.user,
+                    )
 
                     project = self.get_queryset().filter(pk=serializer.instance.id).first()
 

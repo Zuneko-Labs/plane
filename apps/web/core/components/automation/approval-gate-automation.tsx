@@ -15,7 +15,7 @@ import { useTranslation } from "@plane/i18n";
 import { Button } from "@plane/propel/button";
 import { StateGroupIcon, StatePropertyIcon } from "@plane/propel/icons";
 import { setToast, TOAST_TYPE } from "@plane/propel/toast";
-import { CustomSearchSelect, Loader } from "@plane/ui";
+import { CustomSearchSelect, Loader, ToggleSwitch } from "@plane/ui";
 // components
 import { SettingsControlItem } from "@/components/settings/control-item";
 // hooks
@@ -23,15 +23,15 @@ import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
 import { useUserPermissions } from "@/hooks/store/user";
 // services
-import approvalGateService from "@/services/approval-gate.service";
+import approvalGateService, { approvalGateConfigSWRKey } from "@/services/approval-gate.service";
+import type { TApprovalGateConfigPayload } from "@/services/approval-gate.service";
 
 /**
  * Project-level config for the handover approval gate: which States are
- * Pending Approval / Approved / Sent Back. This is the "configurable
- * without a deploy" surface for plane.utils.approval — an explicit
- * override on top of the zero-config default (states already named for one
- * of these roles, or a client department-workflow alias, are gated
- * automatically with no setup; see plane/utils/approval.py).
+ * Pending Approval / Approved / Sent Back. On by default for every project
+ * (see DEFAULT_APPROVAL_GATE_STATES on the backend) — this is the
+ * "configurable without a deploy" surface for plane.utils.approval, letting
+ * an Admin turn the gate off entirely or repoint any of the three states.
  */
 export const ApprovalGateAutomation = observer(function ApprovalGateAutomation() {
   const { workspaceSlug } = useParams();
@@ -44,17 +44,19 @@ export const ApprovalGateAutomation = observer(function ApprovalGateAutomation()
   const projectId = currentProjectDetails?.id;
 
   const { data: configs, mutate } = useSWR(
-    slug && projectId ? `APPROVAL_GATE_CONFIG_SETTINGS_${slug}_${projectId}` : null,
+    slug && projectId ? approvalGateConfigSWRKey(slug, projectId) : null,
     slug && projectId ? () => approvalGateService.fetchConfig(slug, projectId) : null
   );
   const currentConfig = configs?.[0];
 
+  const [isEnabled, setIsEnabled] = useState(true);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [approvedId, setApprovedId] = useState<string | null>(null);
   const [sentBackId, setSentBackId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
+    setIsEnabled(currentConfig?.is_enabled ?? true);
     setPendingId(currentConfig?.pending_approval_state_id ?? null);
     setApprovedId(currentConfig?.approved_state_id ?? null);
     setSentBackId(currentConfig?.sent_back_state_id ?? null);
@@ -90,26 +92,27 @@ export const ApprovalGateAutomation = observer(function ApprovalGateAutomation()
     );
   };
 
-  const isExplicitOverride = !!currentConfig?.id;
   const isDirty =
+    isEnabled !== (currentConfig?.is_enabled ?? true) ||
     pendingId !== (currentConfig?.pending_approval_state_id ?? null) ||
     approvedId !== (currentConfig?.approved_state_id ?? null) ||
     sentBackId !== (currentConfig?.sent_back_state_id ?? null);
 
-  const handleSave = async () => {
-    if (!slug || !projectId || !pendingId || !approvedId) return;
+  // The create endpoint upserts (see ApprovalGateConfigViewSet.create), so
+  // every save — the Save button and the toggle alike — goes through the
+  // same POST regardless of whether a row already exists.
+  const persist = async (overrides: TApprovalGateConfigPayload = {}) => {
+    if (!slug || !projectId) return;
     setIsSaving(true);
     try {
-      const payload = {
+      const payload: TApprovalGateConfigPayload = {
+        is_enabled: isEnabled,
         pending_approval_state_id: pendingId,
         approved_state_id: approvedId,
         sent_back_state_id: sentBackId,
+        ...overrides,
       };
-      if (isExplicitOverride && currentConfig?.id) {
-        await approvalGateService.updateConfig(slug, projectId, currentConfig.id, payload);
-      } else {
-        await approvalGateService.createConfig(slug, projectId, payload);
-      }
+      await approvalGateService.createConfig(slug, projectId, payload);
       await mutate();
       setToast({ type: TOAST_TYPE.SUCCESS, title: "Saved", message: "Approval gate configuration updated." });
     } catch {
@@ -119,22 +122,12 @@ export const ApprovalGateAutomation = observer(function ApprovalGateAutomation()
     }
   };
 
-  const handleClearOverride = async () => {
-    if (!slug || !projectId || !currentConfig?.id) return;
-    setIsSaving(true);
-    try {
-      await approvalGateService.deleteConfig(slug, projectId, currentConfig.id);
-      await mutate();
-      setToast({
-        type: TOAST_TYPE.SUCCESS,
-        title: "Cleared",
-        message: "Reverted to the automatic default (matched by state name).",
-      });
-    } catch {
-      setToast({ type: TOAST_TYPE.ERROR, title: "Error!", message: "Could not clear the override." });
-    } finally {
-      setIsSaving(false);
-    }
+  const handleSave = () => persist();
+
+  const handleToggle = async () => {
+    const nextValue = !isEnabled;
+    setIsEnabled(nextValue);
+    await persist({ is_enabled: nextValue });
   };
 
   return (
@@ -145,8 +138,8 @@ export const ApprovalGateAutomation = observer(function ApprovalGateAutomation()
         </div>
         <SettingsControlItem
           title="Handover approval gate"
-          description="Only a project Admin may move a work item into the Approved or Sent Back state below. A project whose states already match one of these roles by name is gated automatically — this is only needed to override that, or to name states explicitly."
-          control={null}
+          description="Only a project Admin may move a work item into the Approved or Sent Back state below. On by default for every project, mapped to Closed / Excel entry and Handover / Xerox and Binding — change the states below or turn it off entirely."
+          control={<ToggleSwitch value={isEnabled} onChange={handleToggle} size="sm" disabled={!isAdmin || isSaving} />}
         />
       </div>
 
@@ -155,71 +148,65 @@ export const ApprovalGateAutomation = observer(function ApprovalGateAutomation()
           <Loader.Item height="50px" />
         </Loader>
       ) : (
-        <div className="ml-13 flex flex-col rounded-sm border border-subtle bg-surface-2">
-          <div className="flex w-full items-center justify-between gap-2 px-5 py-4">
-            <div className="w-1/2 text-13 font-medium">Pending Approval state</div>
-            <div className="w-1/2">
-              <CustomSearchSelect
-                value={pendingId}
-                label={renderSelectedState(pendingId)}
-                onChange={(val: string) => setPendingId(val)}
-                options={stateOptions([approvedId, sentBackId])}
-                disabled={!isAdmin}
-                input
-              />
+        isEnabled && (
+          <div className="ml-13 flex flex-col rounded-sm border border-subtle bg-surface-2">
+            <div className="flex w-full items-center justify-between gap-2 px-5 py-4">
+              <div className="w-1/2 text-13 font-medium">Pending Approval state</div>
+              <div className="w-1/2">
+                <CustomSearchSelect
+                  value={pendingId}
+                  label={renderSelectedState(pendingId)}
+                  onChange={(val: string) => setPendingId(val)}
+                  options={stateOptions([approvedId, sentBackId])}
+                  disabled={!isAdmin}
+                  input
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="flex w-full items-center justify-between gap-2 border-t border-subtle px-5 py-4">
-            <div className="w-1/2 text-13 font-medium">Approved state</div>
-            <div className="w-1/2">
-              <CustomSearchSelect
-                value={approvedId}
-                label={renderSelectedState(approvedId)}
-                onChange={(val: string) => setApprovedId(val)}
-                options={stateOptions([pendingId, sentBackId])}
-                disabled={!isAdmin}
-                input
-              />
+            <div className="flex w-full items-center justify-between gap-2 border-t border-subtle px-5 py-4">
+              <div className="w-1/2 text-13 font-medium">Approved state</div>
+              <div className="w-1/2">
+                <CustomSearchSelect
+                  value={approvedId}
+                  label={renderSelectedState(approvedId)}
+                  onChange={(val: string) => setApprovedId(val)}
+                  options={stateOptions([pendingId, sentBackId])}
+                  disabled={!isAdmin}
+                  input
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="flex w-full items-center justify-between gap-2 border-t border-subtle px-5 py-4">
-            <div className="w-1/2 text-13 font-medium">Sent Back state (optional)</div>
-            <div className="w-1/2">
-              <CustomSearchSelect
-                value={sentBackId}
-                label={renderSelectedState(sentBackId)}
-                onChange={(val: string) => setSentBackId(val)}
-                options={stateOptions([pendingId, approvedId])}
-                disabled={!isAdmin}
-                input
-              />
+            <div className="flex w-full items-center justify-between gap-2 border-t border-subtle px-5 py-4">
+              <div className="w-1/2 text-13 font-medium">Sent Back state (optional)</div>
+              <div className="w-1/2">
+                <CustomSearchSelect
+                  value={sentBackId}
+                  label={renderSelectedState(sentBackId)}
+                  onChange={(val: string) => setSentBackId(val)}
+                  options={stateOptions([pendingId, approvedId])}
+                  disabled={!isAdmin}
+                  input
+                />
+              </div>
             </div>
-          </div>
 
-          {isAdmin && (
-            <div className="flex items-center justify-between gap-2 border-t border-subtle px-5 py-4">
-              <Button
-                variant="error-outline"
-                size="sm"
-                onClick={handleClearOverride}
-                disabled={!isExplicitOverride || isSaving}
-              >
-                Clear override
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleSave}
-                disabled={!isDirty || !pendingId || !approvedId || isSaving}
-                loading={isSaving}
-              >
-                Save
-              </Button>
-            </div>
-          )}
-        </div>
+            {isAdmin && (
+              <div className="flex items-center justify-end gap-2 border-t border-subtle px-5 py-4">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={!isDirty || !pendingId || (!approvedId && !sentBackId) || isSaving}
+                  loading={isSaving}
+                >
+                  Save
+                </Button>
+              </div>
+            )}
+          </div>
+        )
       )}
     </div>
   );
