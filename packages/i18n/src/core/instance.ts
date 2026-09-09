@@ -15,21 +15,16 @@ import type { i18n as I18nInstance } from "i18next";
 
 export const i18nInstance: I18nInstance = createInstance();
 
-// Resolved relative to this module's own location (not process.cwd()) so it works
-// whether i18next is running against src/ (dev watch) or the bundled dist/ output —
-// the dynamic import below is a non-static template literal, so bundlers can't inline
-// the JSON and the path must resolve correctly at runtime relative to wherever this
-// file ends up on disk. The build copies src/locales -> dist/locales to match.
-const localesBaseUrl = new URL("./locales/", import.meta.url);
-
+// A template-literal dynamic import (not a runtime-computed URL string) so bundlers
+// like Vite can statically analyze and glob-bundle the JSON at build time — a computed
+// `new URL(...).href` import is opaque to them and breaks once this package goes through
+// dependency pre-bundling, where import.meta.url no longer points at the real package
+// directory. packages/i18n/locales is a symlink to src/locales, one level above dist/,
+// which is what "../locales" resolves to from the built dist/index.js.
 i18nInstance
   .use(ICU)
   .use(initReactI18next)
-  .use(
-    resourcesToBackend(
-      (language: string, namespace: string) => import(new URL(`${language}/${namespace}.json`, localesBaseUrl).href)
-    )
-  );
+  .use(resourcesToBackend((language: string, namespace: string) => import(`../locales/${language}/${namespace}.json`)));
 
 const initialLng =
   typeof window !== "undefined" ? localStorage.getItem(LANGUAGE_STORAGE_KEY) || FALLBACK_LANGUAGE : FALLBACK_LANGUAGE;
