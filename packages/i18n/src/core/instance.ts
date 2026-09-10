@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { createInstance } from "i18next";
+import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import ICU from "i18next-icu";
 import resourcesToBackend from "i18next-resources-to-backend";
@@ -13,7 +13,7 @@ import { NAMESPACES, DEFAULT_NAMESPACE } from "../constants/namespaces";
 
 import type { i18n as I18nInstance } from "i18next";
 
-export const i18nInstance: I18nInstance = createInstance();
+export const i18nInstance: I18nInstance = i18n.createInstance();
 
 // A template-literal dynamic import (not a runtime-computed URL string) so bundlers
 // like Vite can statically analyze and glob-bundle the JSON at build time — a computed

@@ -81,6 +81,7 @@ RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
 COPY apps/web/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY --from=installer /app/apps/web/build/client /usr/share/nginx/html
+COPY --from=installer /app/packages/i18n/src/locales /usr/share/nginx/html/assets/locales
 
 EXPOSE 3000
 
