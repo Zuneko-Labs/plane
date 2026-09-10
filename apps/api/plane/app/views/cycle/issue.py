@@ -8,6 +8,7 @@ import json
 
 # Django imports
 from django.core import serializers
+from django.db import transaction
 from django.db.models import F, Func, OuterRef, Q, Subquery
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -21,6 +22,7 @@ from rest_framework.response import Response
 # Module imports
 from .. import BaseViewSet
 from plane.app.serializers import CycleIssueSerializer
+from plane.bgtasks.event_outbox import emit_delete_event, emit_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import Cycle, CycleIssue, Issue, FileAsset, IssueLink
 from plane.utils.grouper import (
@@ -235,85 +237,125 @@ class CycleIssueViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get all CycleIssues already created
-        # Scope to workspace+project to prevent cross-tenant IDOR: without this
-        # scope, foreign-tenant CycleIssue rows matched by issue_id would be
-        # reassigned to the caller's cycle (GHSA-4w5x-wc9w-f47x).
-        cycle_issues = list(
-            CycleIssue.objects.filter(
-                ~Q(cycle_id=cycle_id),
-                issue_id__in=issues,
-                workspace__slug=slug,
-                project_id=project_id,
-            )
-        )
-        existing_issues = [str(cycle_issue.issue_id) for cycle_issue in cycle_issues]
-        new_issues = list(set(issues) - set(existing_issues))
-
-        # Scope to workspace+project to prevent cross-tenant IDOR
-        new_issues = list(
-            str(i)
-            for i in Issue.issue_objects.filter(
-                workspace__slug=slug,
-                project_id=project_id,
-                pk__in=new_issues,
-            ).values_list("id", flat=True)
-        )
-
-        # New issues to create
-        created_records = CycleIssue.objects.bulk_create(
-            [
-                CycleIssue(
+        with transaction.atomic():
+            # Get all CycleIssues already created
+            # Scope to workspace+project to prevent cross-tenant IDOR: without this
+            # scope, foreign-tenant CycleIssue rows matched by issue_id would be
+            # reassigned to the caller's cycle (GHSA-4w5x-wc9w-f47x).
+            cycle_issues = list(
+                CycleIssue.objects.filter(
+                    ~Q(cycle_id=cycle_id),
+                    issue_id__in=issues,
+                    workspace__slug=slug,
                     project_id=project_id,
-                    workspace_id=cycle.workspace_id,
-                    created_by_id=request.user.id,
-                    updated_by_id=request.user.id,
-                    cycle_id=cycle_id,
-                    issue_id=issue,
                 )
-                for issue in new_issues
-            ],
-            batch_size=10,
-        )
+            )
+            existing_issues = [str(cycle_issue.issue_id) for cycle_issue in cycle_issues]
 
-        # Updated Issues
-        updated_records = []
-        update_cycle_issue_activity = []
-        # Iterate over each cycle_issue in cycle_issues
-        for cycle_issue in cycle_issues:
-            old_cycle_id = cycle_issue.cycle_id
-            # Update the cycle_issue's cycle_id
-            cycle_issue.cycle_id = cycle_id
-            # Add the modified cycle_issue to the records_to_update list
-            updated_records.append(cycle_issue)
-            # Record the update activity
-            update_cycle_issue_activity.append(
-                {
-                    "old_cycle_id": str(old_cycle_id),
-                    "new_cycle_id": str(cycle_id),
-                    "issue_id": str(cycle_issue.issue_id),
-                }
+            # Issues already in *this* cycle: not covered by the `~Q(cycle_id=cycle_id)`
+            # query above (that only tracks issues to move from another cycle), so
+            # without this they'd survive into `new_issues` below and bulk_create
+            # would attempt a duplicate (issue, cycle) insert — violating the unique
+            # constraint and crashing the whole request. Treat them as a no-op.
+            already_in_cycle = set(
+                str(i)
+                for i in CycleIssue.objects.filter(
+                    cycle_id=cycle_id,
+                    issue_id__in=issues,
+                    workspace__slug=slug,
+                    project_id=project_id,
+                ).values_list("issue_id", flat=True)
+            )
+            new_issues = list(set(issues) - set(existing_issues) - already_in_cycle)
+
+            # Scope to workspace+project to prevent cross-tenant IDOR
+            new_issues = list(
+                str(i)
+                for i in Issue.issue_objects.filter(
+                    workspace__slug=slug,
+                    project_id=project_id,
+                    pk__in=new_issues,
+                ).values_list("id", flat=True)
             )
 
-        # Update the cycle issues
-        CycleIssue.objects.bulk_update(updated_records, ["cycle_id"], batch_size=100)
-        # Capture Issue Activity
-        issue_activity.delay(
-            type="cycle.activity.created",
-            requested_data=json.dumps({"cycles_list": issues}),
-            actor_id=str(self.request.user.id),
-            issue_id=None,
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=json.dumps(
-                {
-                    "updated_cycle_issues": update_cycle_issue_activity,
-                    "created_cycle_issues": serializers.serialize("json", created_records),
-                }
-            ),
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+            # New issues to create
+            created_records = CycleIssue.objects.bulk_create(
+                [
+                    CycleIssue(
+                        project_id=project_id,
+                        workspace_id=cycle.workspace_id,
+                        created_by_id=request.user.id,
+                        updated_by_id=request.user.id,
+                        cycle_id=cycle_id,
+                        issue_id=issue,
+                    )
+                    for issue in new_issues
+                ],
+                batch_size=10,
+            )
+
+            # Updated Issues
+            updated_records = []
+            update_cycle_issue_activity = []
+            # Iterate over each cycle_issue in cycle_issues
+            for cycle_issue in cycle_issues:
+                old_cycle_id = cycle_issue.cycle_id
+                # Update the cycle_issue's cycle_id
+                cycle_issue.cycle_id = cycle_id
+                # Add the modified cycle_issue to the records_to_update list
+                updated_records.append(cycle_issue)
+                # Record the update activity
+                update_cycle_issue_activity.append(
+                    {
+                        "old_cycle_id": str(old_cycle_id),
+                        "new_cycle_id": str(cycle_id),
+                        "issue_id": str(cycle_issue.issue_id),
+                    }
+                )
+
+            # Update the cycle issues
+            CycleIssue.objects.bulk_update(updated_records, ["cycle_id"], batch_size=100)
+            # Capture Issue Activity
+            issue_activity.delay(
+                type="cycle.activity.created",
+                requested_data=json.dumps({"cycles_list": issues}),
+                actor_id=str(self.request.user.id),
+                issue_id=None,
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=json.dumps(
+                    {
+                        "updated_cycle_issues": update_cycle_issue_activity,
+                        "created_cycle_issues": serializers.serialize("json", created_records),
+                    }
+                ),
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+
+            # Outbox: one event per added/moved cycle-issue link, not one per request.
+            for record in created_records:
+                emit_event(
+                    workspace_id=cycle.workspace_id,
+                    project_id=project_id,
+                    entity_type="cycle_issue",
+                    entity_id=record.id,
+                    event_type="cycle_issue.created",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
+                )
+            for record, activity in zip(updated_records, update_cycle_issue_activity):
+                emit_event(
+                    workspace_id=cycle.workspace_id,
+                    project_id=project_id,
+                    entity_type="cycle_issue",
+                    entity_id=record.id,
+                    event_type="cycle_issue.updated",
+                    actor_id=request.user.id,
+                    data={"id": str(record.id), "cycle_id": str(cycle_id), "issue_id": str(record.issue_id)},
+                    changes={"cycle_id": {"old": activity["old_cycle_id"], "new": activity["new_cycle_id"]}},
+                )
+
         return Response({"message": "success"}, status=status.HTTP_201_CREATED)
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
@@ -324,21 +366,32 @@ class CycleIssueViewSet(BaseViewSet):
             project_id=project_id,
             cycle_id=cycle_id,
         )
-        issue_activity.delay(
-            type="cycle.activity.deleted",
-            requested_data=json.dumps(
-                {
-                    "cycle_id": str(self.kwargs.get("cycle_id")),
-                    "issues": [str(issue_id)],
-                }
-            ),
-            actor_id=str(self.request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
-        cycle_issue.delete()
+        with transaction.atomic():
+            existing = cycle_issue.first()
+            issue_activity.delay(
+                type="cycle.activity.deleted",
+                requested_data=json.dumps(
+                    {
+                        "cycle_id": str(self.kwargs.get("cycle_id")),
+                        "issues": [str(issue_id)],
+                    }
+                ),
+                actor_id=str(self.request.user.id),
+                issue_id=str(issue_id),
+                project_id=str(self.kwargs.get("project_id", None)),
+                current_instance=None,
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+            cycle_issue.delete()
+
+            if existing is not None:
+                emit_delete_event(
+                    model_name="cycle_issue",
+                    entity_id=existing.id,
+                    actor_id=request.user.id,
+                    workspace_id=existing.workspace_id,
+                    project_id=project_id,
+                )
         return Response(status=status.HTTP_204_NO_CONTENT)

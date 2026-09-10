@@ -7,6 +7,7 @@ import json
 
 # Django imports
 from django.utils import timezone
+from django.db import transaction
 from django.db.models import Q, OuterRef, F, Func, UUIDField, Value, CharField, Subquery
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models.functions import Coalesce
@@ -21,6 +22,7 @@ from rest_framework import status
 from .. import BaseViewSet
 from plane.app.serializers import IssueRelationSerializer, RelatedIssueSerializer
 from plane.app.permissions import ProjectEntityPermission
+from plane.bgtasks.event_outbox import emit_model_event, emit_delete_event
 from plane.db.models import (
     Project,
     IssueRelation,
@@ -226,36 +228,77 @@ class IssueRelationViewSet(BaseViewSet):
             ).values_list("id", flat=True)
         )
 
-        issue_relation = IssueRelation.objects.bulk_create(
-            [
-                IssueRelation(
-                    issue_id=(issue if relation_type in ["blocking", "start_after", "finish_after"] else issue_id),
-                    related_issue_id=(
-                        issue_id if relation_type in ["blocking", "start_after", "finish_after"] else issue
-                    ),
-                    relation_type=(get_actual_relation(relation_type)),
-                    project_id=project_id,
-                    workspace_id=project.workspace_id,
-                    created_by=request.user,
-                    updated_by=request.user,
+        with transaction.atomic():
+            new_pairs = [
+                (
+                    (issue if relation_type in ["blocking", "start_after", "finish_after"] else issue_id),
+                    (issue_id if relation_type in ["blocking", "start_after", "finish_after"] else issue),
                 )
                 for issue in issues
-            ],
-            batch_size=10,
-            ignore_conflicts=True,
-        )
+            ]
+            # bulk_create's `id` is set client-side (UUIDField default) before
+            # insert, so it's populated on every object regardless of whether
+            # ignore_conflicts actually skipped the row — checking `id is not
+            # None` can't tell created rows from conflict-skipped ones. Instead,
+            # snapshot which (issue, related_issue) pairs already existed before
+            # the insert, so anything not in that set afterwards is genuinely new.
+            existing_pairs = set(
+                IssueRelation.objects.filter(
+                    project_id=project_id,
+                    deleted_at__isnull=True,
+                    issue_id__in=[pair[0] for pair in new_pairs],
+                    related_issue_id__in=[pair[1] for pair in new_pairs],
+                ).values_list("issue_id", "related_issue_id")
+            )
 
-        issue_activity.delay(
-            type="issue_relation.activity.created",
-            requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+            issue_relation = IssueRelation.objects.bulk_create(
+                [
+                    IssueRelation(
+                        issue_id=issue_id_,
+                        related_issue_id=related_issue_id_,
+                        relation_type=(get_actual_relation(relation_type)),
+                        project_id=project_id,
+                        workspace_id=project.workspace_id,
+                        created_by=request.user,
+                        updated_by=request.user,
+                    )
+                    for issue_id_, related_issue_id_ in new_pairs
+                ],
+                batch_size=10,
+                ignore_conflicts=True,
+            )
+
+            created_relations = [
+                relation
+                for relation in issue_relation
+                if (relation.issue_id, relation.related_issue_id) not in existing_pairs
+            ]
+
+            for relation in created_relations:
+                emit_model_event(
+                    model_name="issue_relation",
+                    model_id=str(relation.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=relation.workspace_id,
+                    project_id=relation.project_id,
+                )
+
+            def _dispatch_relations_created():
+                issue_activity.delay(
+                    type="issue_relation.activity.created",
+                    requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_relations_created, robust=True)
 
         if relation_type in ["blocking", "start_after", "finish_after"]:
             return Response(
@@ -278,16 +321,32 @@ class IssueRelationViewSet(BaseViewSet):
         )
         issue_relations = issue_relations.first()
         current_instance = json.dumps(IssueRelationSerializer(issue_relations).data, cls=DjangoJSONEncoder)
-        issue_relations.delete()
-        issue_activity.delay(
-            type="issue_relation.activity.deleted",
-            requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=current_instance,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+        relation_id = issue_relations.id
+        workspace_id = issue_relations.workspace_id
+        relation_project_id = issue_relations.project_id
+        with transaction.atomic():
+            issue_relations.delete()
+
+            emit_delete_event(
+                model_name="issue_relation",
+                entity_id=str(relation_id),
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=relation_project_id,
+            )
+
+            def _dispatch_relation_deleted():
+                issue_activity.delay(
+                    type="issue_relation.activity.deleted",
+                    requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=current_instance,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_relation_deleted, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -20,7 +20,7 @@ import type {
   TWorkItemFilterExpression,
   TSupportedFilterForUpdate,
 } from "@plane/types";
-import { EIssuesStoreType } from "@plane/types";
+import { EIssueLayoutTypes, EIssuesStoreType } from "@plane/types";
 import { handleIssueQueryParamsByLayout } from "@plane/utils";
 import type { IBaseIssueFilterStore } from "../helpers/issue-filter-helper.store";
 import { IssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
@@ -139,6 +139,9 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
 
     const richFilters = _filters?.rich_filters;
     const displayFilters = this.computedDisplayFilters(_filters?.display_filters);
+    // work items board is always kanban grouped by module, regardless of any previously saved preference
+    displayFilters.layout = EIssueLayoutTypes.KANBAN;
+    displayFilters.group_by = "module";
     const displayProperties = this.computedDisplayProperties(_filters?.display_properties);
 
     // fetching the kanban toggle helpers in the local storage
@@ -220,10 +223,10 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
             _filters.displayFilters.sub_group_by = null;
             updatedDisplayFilters.sub_group_by = null;
           }
-          // set group_by to state if layout is switched to kanban and group_by is null
+          // set group_by to module if layout is switched to kanban and group_by is null
           if (_filters.displayFilters.layout === "kanban" && _filters.displayFilters.group_by === null) {
-            _filters.displayFilters.group_by = "state";
-            updatedDisplayFilters.group_by = "state";
+            _filters.displayFilters.group_by = "module";
+            updatedDisplayFilters.group_by = "module";
           }
 
           runInAction(() => {

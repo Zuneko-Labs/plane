@@ -10,6 +10,7 @@ import uuid
 from django.utils import timezone
 from django.core.serializers.json import DjangoJSONEncoder
 from django.conf import settings
+from django.db import transaction
 from django.http import HttpResponseRedirect
 
 # Third Party imports
@@ -20,6 +21,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 # Module imports
 from .. import BaseAPIView
 from plane.app.serializers import IssueAttachmentSerializer
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import FileAsset, Workspace
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.app.permissions import allow_permission, ROLE
@@ -39,23 +41,39 @@ class IssueAttachmentEndpoint(BaseAPIView):
         serializer = IssueAttachmentSerializer(data=request.data)
         workspace = Workspace.objects.get(slug=slug)
         if serializer.is_valid():
-            serializer.save(
-                project_id=project_id,
-                issue_id=issue_id,
-                workspace_id=workspace.id,
-                entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-            )
-            issue_activity.delay(
-                type="attachment.activity.created",
-                requested_data=None,
-                actor_id=str(self.request.user.id),
-                issue_id=str(self.kwargs.get("issue_id", None)),
-                project_id=str(self.kwargs.get("project_id", None)),
-                current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
+            with transaction.atomic():
+                serializer.save(
+                    project_id=project_id,
+                    issue_id=issue_id,
+                    workspace_id=workspace.id,
+                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                )
+                attachment = serializer.instance
+
+                emit_model_event(
+                    model_name="issue_attachment",
+                    model_id=str(attachment.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=attachment.workspace_id,
+                    project_id=attachment.project_id,
+                )
+
+                def _dispatch_attachment_created():
+                    issue_activity.delay(
+                        type="attachment.activity.created",
+                        requested_data=None,
+                        actor_id=str(self.request.user.id),
+                        issue_id=str(self.kwargs.get("issue_id", None)),
+                        project_id=str(self.kwargs.get("project_id", None)),
+                        current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                        epoch=int(timezone.now().timestamp()),
+                        notification=True,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_attachment_created, robust=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -69,19 +87,36 @@ class IssueAttachmentEndpoint(BaseAPIView):
                 {"error": "Issue attachment not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        issue_attachment.asset.delete(save=False)
-        issue_attachment.delete()
-        issue_activity.delay(
-            type="attachment.activity.deleted",
-            requested_data=None,
-            actor_id=str(self.request.user.id),
-            issue_id=str(self.kwargs.get("issue_id", None)),
-            project_id=str(self.kwargs.get("project_id", None)),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+        workspace_id = issue_attachment.workspace_id
+        attachment_project_id = issue_attachment.project_id
+        attachment_name = issue_attachment.attributes.get("name")
+        with transaction.atomic():
+            issue_attachment.asset.delete(save=False)
+            issue_attachment.delete()
+
+            emit_delete_event(
+                model_name="issue_attachment",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=attachment_project_id,
+                entity_name=attachment_name,
+            )
+
+            def _dispatch_attachment_deleted():
+                issue_activity.delay(
+                    type="attachment.activity.deleted",
+                    requested_data=None,
+                    actor_id=str(self.request.user.id),
+                    issue_id=str(self.kwargs.get("issue_id", None)),
+                    project_id=str(self.kwargs.get("project_id", None)),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -153,19 +188,33 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
         )
         issue_attachment.is_deleted = True
         issue_attachment.deleted_at = timezone.now()
-        issue_attachment.save()
 
-        issue_activity.delay(
-            type="attachment.activity.deleted",
-            requested_data=None,
-            actor_id=str(self.request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+        with transaction.atomic():
+            issue_attachment.save()
+
+            emit_delete_event(
+                model_name="issue_attachment",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=issue_attachment.workspace_id,
+                project_id=issue_attachment.project_id,
+                entity_name=issue_attachment.attributes.get("name"),
+            )
+
+            def _dispatch_attachment_deleted():
+                issue_activity.delay(
+                    type="attachment.activity.deleted",
+                    requested_data=None,
+                    actor_id=str(self.request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -211,21 +260,37 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
 
         # Send this activity only if the attachment is not uploaded before
         if not issue_attachment.is_uploaded:
-            issue_activity.delay(
-                type="attachment.activity.created",
-                requested_data=None,
-                actor_id=str(self.request.user.id),
-                issue_id=str(self.kwargs.get("issue_id", None)),
-                project_id=str(self.kwargs.get("project_id", None)),
-                current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-
             # Update the attachment — do NOT overwrite created_by; it is set at
             # creation time and must not be reassigned (GHSA-5mxw-g5mw-3v3w).
             issue_attachment.is_uploaded = True
+
+            with transaction.atomic():
+                issue_attachment.save()
+
+                emit_model_event(
+                    model_name="issue_attachment",
+                    model_id=str(issue_attachment.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=issue_attachment.workspace_id,
+                    project_id=issue_attachment.project_id,
+                )
+
+                def _dispatch_attachment_created():
+                    issue_activity.delay(
+                        type="attachment.activity.created",
+                        requested_data=None,
+                        actor_id=str(self.request.user.id),
+                        issue_id=str(self.kwargs.get("issue_id", None)),
+                        project_id=str(self.kwargs.get("project_id", None)),
+                        current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                        epoch=int(timezone.now().timestamp()),
+                        notification=True,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_attachment_created, robust=True)
 
         # Get the storage metadata
         if not issue_attachment.storage_metadata:

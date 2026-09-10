@@ -10,7 +10,7 @@ import re
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponseRedirect
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import (
     Case,
     CharField,
@@ -89,6 +89,10 @@ from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
+from plane.bgtasks.event_outbox import (
+    emit_delete_event,
+    emit_model_event,
+)
 from plane.bgtasks.webhook_task import model_activity
 from plane.app.permissions import ROLE
 from plane.utils.openapi import (
@@ -474,36 +478,53 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            serializer.save()
-            # Refetch the issue
-            issue = Issue.objects.filter(workspace__slug=slug, project_id=project_id, pk=serializer.data["id"]).first()
-            issue.created_at = request.data.get("created_at", timezone.now())
-            issue.created_by_id = request.data.get("created_by", request.user.id)
-            issue.save(update_fields=["created_at", "created_by"])
+            with transaction.atomic():
+                serializer.save()
+                # Refetch the issue
+                issue = Issue.objects.filter(
+                    workspace__slug=slug, project_id=project_id, pk=serializer.data["id"]
+                ).first()
+                issue.created_at = request.data.get("created_at", timezone.now())
+                issue.created_by_id = request.data.get("created_by", request.user.id)
+                issue.save(update_fields=["created_at", "created_by"])
 
-            # Track the issue
-            issue_activity.delay(
-                type="issue.activity.created",
-                requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
-                actor_id=str(request.user.id),
-                issue_id=str(serializer.data.get("id", None)),
-                project_id=str(project_id),
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
+                # Track the issue
+                issue_activity.delay(
+                    type="issue.activity.created",
+                    requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
+                    actor_id=str(request.user.id),
+                    issue_id=str(serializer.data.get("id", None)),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue",
-                model_id=str(serializer.data["id"]),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                emit_model_event(
+                    model_name="issue",
+                    model_id=str(serializer.data["id"]),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue",
+                        model_id=str(serializer.data["id"]),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -642,28 +663,44 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 if serializer.is_valid():
                     # If the serializer is valid, save the issue and dispatch
                     # the update issue activity worker event.
-                    serializer.save()
-                    issue_activity.delay(
-                        type="issue.activity.updated",
-                        requested_data=requested_data,
-                        actor_id=str(request.user.id),
-                        issue_id=str(issue.id),
-                        project_id=str(project_id),
-                        current_instance=current_instance,
-                        epoch=int(timezone.now().timestamp()),
-                        notification=True,
-                        origin=base_host(request=request, is_app=True),
-                    )
-                    # Send the model activity for webhook dispatch
-                    model_activity.delay(
-                        model_name="issue",
-                        model_id=str(issue.id),
-                        requested_data=request.data,
-                        current_instance=current_instance,
-                        actor_id=request.user.id,
-                        slug=slug,
-                        origin=base_host(request=request, is_app=True),
-                    )
+                    with transaction.atomic():
+                        serializer.save()
+                        issue_activity.delay(
+                            type="issue.activity.updated",
+                            requested_data=requested_data,
+                            actor_id=str(request.user.id),
+                            issue_id=str(issue.id),
+                            project_id=str(project_id),
+                            current_instance=current_instance,
+                            epoch=int(timezone.now().timestamp()),
+                            notification=True,
+                            origin=base_host(request=request, is_app=True),
+                        )
+
+                        emit_model_event(
+                            model_name="issue",
+                            model_id=str(issue.id),
+                            requested_data=request.data,
+                            current_instance=current_instance,
+                            actor_id=request.user.id,
+                            workspace_id=project.workspace_id,
+                            project_id=project.id,
+                        )
+
+                        # Send the model activity for webhook dispatch
+                        def _dispatch_model_activity():
+                            model_activity.delay(
+                                model_name="issue",
+                                model_id=str(issue.id),
+                                requested_data=request.data,
+                                current_instance=current_instance,
+                                actor_id=request.user.id,
+                                slug=slug,
+                                origin=base_host(request=request, is_app=True),
+                            )
+
+                        transaction.on_commit(_dispatch_model_activity, robust=True)
+
                     return Response(serializer.data, status=status.HTTP_200_OK)
                 return Response(
                     # If the serializer is not valid, respond with 400 bad
@@ -688,42 +725,58 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 # If the serializer is valid, save the issue and dispatch the
                 # issue activity worker event as created
                 if serializer.is_valid():
-                    serializer.save()
-                    # Refetch the issue
-                    issue = Issue.objects.filter(
-                        workspace__slug=slug,
-                        project_id=project_id,
-                        pk=serializer.data["id"],
-                    ).first()
+                    with transaction.atomic():
+                        serializer.save()
+                        # Refetch the issue
+                        issue = Issue.objects.filter(
+                            workspace__slug=slug,
+                            project_id=project_id,
+                            pk=serializer.data["id"],
+                        ).first()
 
-                    # If any of the created_at or created_by is present, update
-                    # the issue with the provided data, else return with the
-                    # default states given.
-                    issue.created_at = request.data.get("created_at", timezone.now())
-                    issue.created_by_id = request.data.get("created_by", request.user.id)
-                    issue.save(update_fields=["created_at", "created_by"])
+                        # If any of the created_at or created_by is present, update
+                        # the issue with the provided data, else return with the
+                        # default states given.
+                        issue.created_at = request.data.get("created_at", timezone.now())
+                        issue.created_by_id = request.data.get("created_by", request.user.id)
+                        issue.save(update_fields=["created_at", "created_by"])
 
-                    issue_activity.delay(
-                        type="issue.activity.created",
-                        requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
-                        actor_id=str(request.user.id),
-                        issue_id=str(serializer.data.get("id", None)),
-                        project_id=str(project_id),
-                        current_instance=None,
-                        epoch=int(timezone.now().timestamp()),
-                        notification=True,
-                        origin=base_host(request=request, is_app=True),
-                    )
-                    # Send the model activity for webhook dispatch
-                    model_activity.delay(
-                        model_name="issue",
-                        model_id=str(serializer.data["id"]),
-                        requested_data=request.data,
-                        current_instance=None,
-                        actor_id=request.user.id,
-                        slug=slug,
-                        origin=base_host(request=request, is_app=True),
-                    )
+                        issue_activity.delay(
+                            type="issue.activity.created",
+                            requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
+                            actor_id=str(request.user.id),
+                            issue_id=str(serializer.data.get("id", None)),
+                            project_id=str(project_id),
+                            current_instance=None,
+                            epoch=int(timezone.now().timestamp()),
+                            notification=True,
+                            origin=base_host(request=request, is_app=True),
+                        )
+
+                        emit_model_event(
+                            model_name="issue",
+                            model_id=str(serializer.data["id"]),
+                            requested_data=request.data,
+                            current_instance=None,
+                            actor_id=request.user.id,
+                            workspace_id=project.workspace_id,
+                            project_id=project.id,
+                        )
+
+                        # Send the model activity for webhook dispatch
+                        def _dispatch_model_activity():
+                            model_activity.delay(
+                                model_name="issue",
+                                model_id=str(serializer.data["id"]),
+                                requested_data=request.data,
+                                current_instance=None,
+                                actor_id=request.user.id,
+                                slug=slug,
+                                origin=base_host(request=request, is_app=True),
+                            )
+
+                        transaction.on_commit(_dispatch_model_activity, robust=True)
+
                     return Response(serializer.data, status=status.HTTP_201_CREATED)
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -789,28 +842,44 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            serializer.save()
-            issue_activity.delay(
-                type="issue.activity.updated",
-                requested_data=requested_data,
-                actor_id=str(request.user.id),
-                issue_id=str(pk),
-                project_id=str(project_id),
-                current_instance=current_instance,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            # Send the model activity for webhook dispatch
-            model_activity.delay(
-                model_name="issue",
-                model_id=str(pk),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+            with transaction.atomic():
+                serializer.save()
+                issue_activity.delay(
+                    type="issue.activity.updated",
+                    requested_data=requested_data,
+                    actor_id=str(request.user.id),
+                    issue_id=str(pk),
+                    project_id=str(project_id),
+                    current_instance=current_instance,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+                emit_model_event(
+                    model_name="issue",
+                    model_id=str(pk),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                )
+
+                # Send the model activity for webhook dispatch
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue",
+                        model_id=str(pk),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -848,16 +917,28 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
-        issue.delete()
-        issue_activity.delay(
-            type="issue.activity.deleted",
-            requested_data=json.dumps({"issue_id": str(pk)}),
-            actor_id=str(request.user.id),
-            issue_id=str(pk),
-            project_id=str(project_id),
-            current_instance=current_instance,
-            epoch=int(timezone.now().timestamp()),
-        )
+        workspace_id = issue.workspace_id
+        issue_name = issue.name
+        with transaction.atomic():
+            issue.delete()
+            issue_activity.delay(
+                type="issue.activity.deleted",
+                requested_data=json.dumps({"issue_id": str(pk)}),
+                actor_id=str(request.user.id),
+                issue_id=str(pk),
+                project_id=str(project_id),
+                current_instance=current_instance,
+                epoch=int(timezone.now().timestamp()),
+            )
+
+            emit_delete_event(
+                model_name="issue",
+                entity_id=pk,
+                actor_id=request.user.id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                entity_name=issue_name,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -935,8 +1016,19 @@ class LabelListCreateAPIEndpoint(BaseAPIView):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-                serializer.save(project_id=project_id)
-                label = Label.objects.get(pk=serializer.instance.id)
+                with transaction.atomic():
+                    serializer.save(project_id=project_id)
+                    label = Label.objects.get(pk=serializer.instance.id)
+
+                    emit_model_event(
+                        model_name="label",
+                        model_id=str(label.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=label.workspace_id,
+                        project_id=label.project_id,
+                    )
                 serializer = LabelSerializer(label)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1047,6 +1139,7 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
         Validates external ID uniqueness if provided.
         """
         label = self.get_queryset().get(pk=pk)
+        current_instance = json.dumps(LabelSerializer(label).data, cls=DjangoJSONEncoder)
         serializer = LabelCreateUpdateSerializer(label, data=request.data, partial=True)
         if serializer.is_valid():
             if (
@@ -1068,8 +1161,19 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            serializer.save()
-            label = Label.objects.get(pk=serializer.instance.id)
+            with transaction.atomic():
+                serializer.save()
+                label = Label.objects.get(pk=serializer.instance.id)
+
+                emit_model_event(
+                    model_name="label",
+                    model_id=str(label.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=label.workspace_id,
+                    project_id=label.project_id,
+                )
             serializer = LabelSerializer(label)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1092,7 +1196,18 @@ class LabelDetailAPIEndpoint(LabelListCreateAPIEndpoint):
         This action cannot be undone.
         """
         label = self.get_queryset().get(pk=pk)
-        label.delete()
+        with transaction.atomic():
+            label_name = label.name
+            label.delete()
+
+            emit_delete_event(
+                model_name="label",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=label.workspace_id,
+                project_id=label.project_id,
+                entity_name=label_name,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1181,20 +1296,35 @@ class IssueLinkListCreateAPIEndpoint(BaseAPIView):
         """
         serializer = IssueLinkCreateSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(project_id=project_id, issue_id=issue_id)
-            crawl_work_item_link_title.delay(serializer.instance.id, serializer.instance.url)
-            link = IssueLink.objects.get(pk=serializer.instance.id)
-            link.created_by_id = request.data.get("created_by", request.user.id)
-            link.save(update_fields=["created_by"])
-            issue_activity.delay(
-                type="link.activity.created",
-                requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                issue_id=str(self.kwargs.get("issue_id")),
-                project_id=str(self.kwargs.get("project_id")),
-                actor_id=str(link.created_by_id),
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-            )
+            with transaction.atomic():
+                serializer.save(project_id=project_id, issue_id=issue_id)
+                crawl_work_item_link_title.delay(serializer.instance.id, serializer.instance.url)
+                link = IssueLink.objects.get(pk=serializer.instance.id)
+                link.created_by_id = request.data.get("created_by", request.user.id)
+                link.save(update_fields=["created_by"])
+
+                emit_model_event(
+                    model_name="issue_link",
+                    model_id=str(link.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=link.created_by_id,
+                    workspace_id=link.workspace_id,
+                    project_id=link.project_id,
+                )
+
+                def _dispatch_link_created():
+                    issue_activity.delay(
+                        type="link.activity.created",
+                        requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                        issue_id=str(self.kwargs.get("issue_id")),
+                        project_id=str(self.kwargs.get("project_id")),
+                        actor_id=str(link.created_by_id),
+                        current_instance=None,
+                        epoch=int(timezone.now().timestamp()),
+                    )
+
+                transaction.on_commit(_dispatch_link_created, robust=True)
             serializer = IssueLinkSerializer(link)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1295,17 +1425,32 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
         current_instance = json.dumps(IssueLinkSerializer(issue_link).data, cls=DjangoJSONEncoder)
         serializer = IssueLinkSerializer(issue_link, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            crawl_work_item_link_title.delay(serializer.data.get("id"), serializer.data.get("url"))
-            issue_activity.delay(
-                type="link.activity.updated",
-                requested_data=requested_data,
-                actor_id=str(request.user.id),
-                issue_id=str(issue_id),
-                project_id=str(project_id),
-                current_instance=current_instance,
-                epoch=int(timezone.now().timestamp()),
-            )
+            with transaction.atomic():
+                serializer.save()
+
+                emit_model_event(
+                    model_name="issue_link",
+                    model_id=str(issue_link.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=issue_link.workspace_id,
+                    project_id=issue_link.project_id,
+                )
+
+                def _dispatch_link_updated():
+                    crawl_work_item_link_title.delay(serializer.data.get("id"), serializer.data.get("url"))
+                    issue_activity.delay(
+                        type="link.activity.updated",
+                        requested_data=requested_data,
+                        actor_id=str(request.user.id),
+                        issue_id=str(issue_id),
+                        project_id=str(project_id),
+                        current_instance=current_instance,
+                        epoch=int(timezone.now().timestamp()),
+                    )
+
+                transaction.on_commit(_dispatch_link_updated, robust=True)
             serializer = IssueLinkSerializer(issue_link)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1330,16 +1475,31 @@ class IssueLinkDetailAPIEndpoint(BaseAPIView):
         """
         issue_link = IssueLink.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
         current_instance = json.dumps(IssueLinkSerializer(issue_link).data, cls=DjangoJSONEncoder)
-        issue_activity.delay(
-            type="link.activity.deleted",
-            requested_data=json.dumps({"link_id": str(pk)}),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=current_instance,
-            epoch=int(timezone.now().timestamp()),
-        )
-        issue_link.delete()
+        link_name = issue_link.title or issue_link.url
+        with transaction.atomic():
+            issue_link.delete()
+
+            emit_delete_event(
+                model_name="issue_link",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=issue_link.workspace_id,
+                project_id=issue_link.project_id,
+                entity_name=link_name,
+            )
+
+            def _dispatch_link_deleted():
+                issue_activity.delay(
+                    type="link.activity.deleted",
+                    requested_data=json.dumps({"link_id": str(pk)}),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=current_instance,
+                    epoch=int(timezone.now().timestamp()),
+                )
+
+            transaction.on_commit(_dispatch_link_deleted, robust=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1465,34 +1625,48 @@ class IssueCommentListCreateAPIEndpoint(BaseAPIView):
 
         serializer = IssueCommentCreateSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(project_id=project_id, issue_id=issue_id, actor=request.user)
-            issue_comment = IssueComment.objects.get(pk=serializer.instance.id)
-            # Update the created_at and the created_by and save the comment
-            issue_comment.created_at = request.data.get("created_at", timezone.now())
-            issue_comment.created_by_id = request.data.get("created_by", request.user.id)
-            issue_comment.actor_id = request.data.get("created_by", request.user.id)
-            issue_comment.save(update_fields=["created_at", "created_by"])
+            with transaction.atomic():
+                serializer.save(project_id=project_id, issue_id=issue_id, actor=request.user)
+                issue_comment = IssueComment.objects.get(pk=serializer.instance.id)
+                # Update the created_at and the created_by and save the comment
+                issue_comment.created_at = request.data.get("created_at", timezone.now())
+                issue_comment.created_by_id = request.data.get("created_by", request.user.id)
+                issue_comment.actor_id = request.data.get("created_by", request.user.id)
+                issue_comment.save(update_fields=["created_at", "created_by"])
 
-            issue_activity.delay(
-                type="comment.activity.created",
-                requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                actor_id=str(issue_comment.created_by_id),
-                issue_id=str(self.kwargs.get("issue_id")),
-                project_id=str(self.kwargs.get("project_id")),
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-            )
+                issue_activity.delay(
+                    type="comment.activity.created",
+                    requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                    actor_id=str(issue_comment.created_by_id),
+                    issue_id=str(self.kwargs.get("issue_id")),
+                    project_id=str(self.kwargs.get("project_id")),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                )
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue_comment",
-                model_id=str(serializer.instance.id),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                emit_model_event(
+                    model_name="issue_comment",
+                    model_id=str(serializer.instance.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=issue_comment.workspace_id,
+                    project_id=issue_comment.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue_comment",
+                        model_id=str(serializer.instance.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             serializer = IssueCommentSerializer(issue_comment)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -1612,26 +1786,41 @@ class IssueCommentDetailAPIEndpoint(BaseAPIView):
 
         serializer = IssueCommentCreateSerializer(issue_comment, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            issue_activity.delay(
-                type="comment.activity.updated",
-                requested_data=requested_data,
-                actor_id=str(request.user.id),
-                issue_id=str(issue_id),
-                project_id=str(project_id),
-                current_instance=current_instance,
-                epoch=int(timezone.now().timestamp()),
-            )
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue_comment",
-                model_id=str(pk),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+            with transaction.atomic():
+                serializer.save()
+                issue_activity.delay(
+                    type="comment.activity.updated",
+                    requested_data=requested_data,
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=current_instance,
+                    epoch=int(timezone.now().timestamp()),
+                )
+
+                emit_model_event(
+                    model_name="issue_comment",
+                    model_id=str(pk),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=issue_comment.workspace_id,
+                    project_id=issue_comment.project_id,
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="issue_comment",
+                        model_id=str(pk),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             issue_comment = IssueComment.objects.get(pk=serializer.instance.id)
             serializer = IssueCommentSerializer(issue_comment)
@@ -2042,19 +2231,33 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
         issue_attachment = FileAsset.objects.get(pk=pk, workspace__slug=slug, project_id=project_id)
         issue_attachment.is_deleted = True
         issue_attachment.deleted_at = timezone.now()
-        issue_attachment.save()
 
-        issue_activity.delay(
-            type="attachment.activity.deleted",
-            requested_data=None,
-            actor_id=str(self.request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+        with transaction.atomic():
+            issue_attachment.save()
+
+            emit_delete_event(
+                model_name="issue_attachment",
+                entity_id=str(pk),
+                actor_id=request.user.id,
+                workspace_id=issue_attachment.workspace_id,
+                project_id=issue_attachment.project_id,
+                entity_name=issue_attachment.attributes.get("name"),
+            )
+
+            def _dispatch_attachment_deleted():
+                issue_activity.delay(
+                    type="attachment.activity.deleted",
+                    requested_data=None,
+                    actor_id=str(self.request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_attachment_deleted, robust=True)
 
         # Get the storage metadata
         if not issue_attachment.storage_metadata:
@@ -2182,21 +2385,37 @@ class IssueAttachmentDetailAPIEndpoint(BaseAPIView):
 
         # Send this activity only if the attachment is not uploaded before
         if not issue_attachment.is_uploaded:
-            issue_activity.delay(
-                type="attachment.activity.created",
-                requested_data=None,
-                actor_id=str(self.request.user.id),
-                issue_id=str(self.kwargs.get("issue_id", None)),
-                project_id=str(self.kwargs.get("project_id", None)),
-                current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-
             # Update the attachment
             issue_attachment.is_uploaded = True
             issue_attachment.created_by = request.user
+
+            with transaction.atomic():
+                issue_attachment.save()
+
+                emit_model_event(
+                    model_name="issue_attachment",
+                    model_id=str(issue_attachment.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=issue_attachment.workspace_id,
+                    project_id=issue_attachment.project_id,
+                )
+
+                def _dispatch_attachment_created():
+                    issue_activity.delay(
+                        type="attachment.activity.created",
+                        requested_data=None,
+                        actor_id=str(self.request.user.id),
+                        issue_id=str(self.kwargs.get("issue_id", None)),
+                        project_id=str(self.kwargs.get("project_id", None)),
+                        current_instance=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+                        epoch=int(timezone.now().timestamp()),
+                        notification=True,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_attachment_created, robust=True)
 
         # Get the storage metadata
         if not issue_attachment.storage_metadata:
@@ -2515,34 +2734,52 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
             ).values_list("id", flat=True)
         )
 
-        IssueRelation.objects.bulk_create(
-            [
-                IssueRelation(
-                    issue_id=(issue if is_reverse else issue_id),
-                    related_issue_id=(issue_id if is_reverse else issue),
-                    relation_type=actual_relation,
-                    project_id=project_id,
-                    workspace_id=project.workspace_id,
-                    created_by=request.user,
-                    updated_by=request.user,
-                )
-                for issue in issues
-            ],
-            batch_size=10,
-            ignore_conflicts=True,
-        )
+        with transaction.atomic():
+            created_relations = IssueRelation.objects.bulk_create(
+                [
+                    IssueRelation(
+                        issue_id=(issue if is_reverse else issue_id),
+                        related_issue_id=(issue_id if is_reverse else issue),
+                        relation_type=actual_relation,
+                        project_id=project_id,
+                        workspace_id=project.workspace_id,
+                        created_by=request.user,
+                        updated_by=request.user,
+                    )
+                    for issue in issues
+                ],
+                batch_size=10,
+                ignore_conflicts=True,
+            )
 
-        issue_activity.delay(
-            type="issue_relation.activity.created",
-            requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
-            actor_id=str(request.user.id),
-            issue_id=str(issue_id),
-            project_id=str(project_id),
-            current_instance=None,
-            epoch=int(timezone.now().timestamp()),
-            notification=True,
-            origin=base_host(request=request, is_app=True),
-        )
+            # One event per relation row, mirroring BulkArchiveIssuesEndpoint's
+            # one-event-per-issue treatment — a bulk mutation must not collapse
+            # into a single event covering N rows.
+            for relation in created_relations:
+                emit_model_event(
+                    model_name="issue_relation",
+                    model_id=str(relation.id),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=relation.workspace_id,
+                    project_id=relation.project_id,
+                )
+
+            def _dispatch_relations_created():
+                issue_activity.delay(
+                    type="issue_relation.activity.created",
+                    requested_data=json.dumps(request.data, cls=DjangoJSONEncoder),
+                    actor_id=str(request.user.id),
+                    issue_id=str(issue_id),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
+                )
+
+            transaction.on_commit(_dispatch_relations_created, robust=True)
 
         # Re-fetch with select_related to avoid N+1 queries in serializers.
         # bulk_create with ignore_conflicts=True may not return PKs,

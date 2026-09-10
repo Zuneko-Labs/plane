@@ -39,5 +39,15 @@ class ProjectMemberSerializer(BaseSerializer):
 
     class Meta:
         model = ProjectMember
-        fields = ["id", "member", "role"]
-        read_only_fields = ["id"]
+        fields = ["id", "member", "role", "project", "workspace", "is_active", "created_at", "updated_at"]
+        read_only_fields = ["id", "project", "workspace", "is_active", "created_at", "updated_at"]
+
+    def to_representation(self, instance):
+        from plane.api.serializers.user import UserLiteSerializer
+        from plane.api.serializers.project import ProjectLiteSerializer
+        from plane.api.serializers.workspace import WorkspaceLiteSerializer
+        data = super().to_representation(instance)
+        data["member"] = UserLiteSerializer(instance.member).data
+        data["project"] = ProjectLiteSerializer(instance.project).data
+        data["workspace"] = WorkspaceLiteSerializer(instance.workspace).data
+        return data

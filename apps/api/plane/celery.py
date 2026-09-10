@@ -41,7 +41,19 @@ app = Celery("plane")
 # pickle the object when using Windows.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 
+# A worker killed mid-task (OOM, deploy, crash) must not silently drop the
+# task: without these, Celery acks before execution and the task is gone.
+app.conf.task_acks_late = True
+app.conf.task_reject_on_worker_lost = True
+
 app.conf.beat_schedule = {
+    # Correctness backstop for the event outbox — picks up anything the
+    # transaction.on_commit fast path missed (e.g. broker unreachable at
+    # commit time). See bgtasks/event_outbox.py.
+    "relay-outbox-events": {
+        "task": "plane.bgtasks.event_outbox.relay_events",
+        "schedule": schedule(run_every=timedelta(seconds=30)),
+    },
     # Intra day recurring jobs
     "check-every-five-minutes-to-send-email-notifications": {
         "task": "plane.bgtasks.email_notification_task.stack_email_notification",
@@ -95,6 +107,10 @@ app.conf.beat_schedule = {
     "check-every-day-to-delete-exporter-history": {
         "task": "plane.bgtasks.exporter_expired_task.delete_old_s3_link",
         "schedule": crontab(hour=3, minute=45),  # UTC 03:45
+    },
+    "check-every-day-to-delete-event-logs": {
+        "task": "plane.bgtasks.cleanup_task.delete_event_logs",
+        "schedule": crontab(hour=4, minute=0),  # UTC 04:00
     },
 }
 

@@ -11,9 +11,16 @@ from drf_spectacular.utils import (
     OpenApiRequest,
 )
 
+import json
+
+# Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
+
 # Module imports
 from .base import BaseAPIView
 from plane.api.serializers import UserLiteSerializer, ProjectMemberSerializer
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.db.models import User, Workspace, WorkspaceMember, ProjectMember
 from plane.utils.permissions import ProjectMemberPermission, WorkSpaceAdminPermission, ProjectAdminPermission
 from plane.utils.openapi import (
@@ -152,7 +159,19 @@ class ProjectMemberListCreateAPIEndpoint(BaseAPIView):
     def post(self, request, slug, project_id):
         serializer = ProjectMemberSerializer(data=request.data, context={"slug": slug})
         serializer.is_valid(raise_exception=True)
-        serializer.save(project_id=project_id)
+        with transaction.atomic():
+            serializer.save(project_id=project_id)
+            project_member = serializer.instance
+
+            emit_model_event(
+                model_name="project_member",
+                model_id=str(project_member.id),
+                requested_data=request.data,
+                current_instance=None,
+                actor_id=request.user.id,
+                workspace_id=project_member.workspace_id,
+                project_id=project_member.project_id,
+            )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -202,9 +221,21 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
     )
     def patch(self, request, slug, project_id, pk):
         project_member = ProjectMember.objects.get(project_id=project_id, workspace__slug=slug, pk=pk)
+        current_instance = json.dumps(ProjectMemberSerializer(project_member).data, cls=DjangoJSONEncoder)
         serializer = ProjectMemberSerializer(project_member, data=request.data, partial=True, context={"slug": slug})
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+
+            emit_model_event(
+                model_name="project_member",
+                model_id=str(project_member.id),
+                requested_data=request.data,
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=project_member.workspace_id,
+                project_id=project_member.project_id,
+            )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -217,6 +248,18 @@ class ProjectMemberDetailAPIEndpoint(ProjectMemberListCreateAPIEndpoint):
     )
     def delete(self, request, slug, project_id, pk):
         project_member = ProjectMember.objects.get(project_id=project_id, workspace__slug=slug, pk=pk)
+        current_instance = json.dumps(ProjectMemberSerializer(project_member).data, cls=DjangoJSONEncoder)
         project_member.is_active = False
-        project_member.save()
+        with transaction.atomic():
+            project_member.save()
+
+            emit_model_event(
+                model_name="project_member",
+                model_id=str(project_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=project_member.workspace_id,
+                project_id=project_member.project_id,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)

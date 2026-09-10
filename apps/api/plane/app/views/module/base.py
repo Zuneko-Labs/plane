@@ -25,7 +25,7 @@ from django.db.models import (
     Case,
     When,
 )
-from django.db import models
+from django.db import models, transaction
 from django.db.models.functions import Coalesce, Cast, Concat
 from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
@@ -62,6 +62,7 @@ from plane.db.models import (
 )
 from plane.utils.analytics_plot import burndown_plot
 from plane.utils.timezone_converter import user_timezone_converter
+from plane.bgtasks.event_outbox import emit_model_event
 from plane.bgtasks.webhook_task import model_activity
 from .. import BaseAPIView, BaseViewSet
 from plane.bgtasks.recent_visited_task import recent_visited_task
@@ -297,54 +298,70 @@ class ModuleViewSet(BaseViewSet):
         serializer = ModuleWriteSerializer(data=request.data, context={"project": project})
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
 
-            module = (
-                self.get_queryset()
-                .filter(pk=serializer.data["id"])
-                .values(  # Required fields
-                    "id",
-                    "workspace_id",
-                    "project_id",
-                    # Model fields
-                    "name",
-                    "description",
-                    "description_text",
-                    "description_html",
-                    "start_date",
-                    "target_date",
-                    "status",
-                    "lead_id",
-                    "member_ids",
-                    "view_props",
-                    "sort_order",
-                    "external_source",
-                    "external_id",
-                    "logo_props",
-                    # computed fields
-                    "is_favorite",
-                    "cancelled_issues",
-                    "completed_issues",
-                    "total_issues",
-                    "started_issues",
-                    "unstarted_issues",
-                    "completed_estimate_points",
-                    "total_estimate_points",
-                    "backlog_issues",
-                    "created_at",
-                    "updated_at",
+                module = (
+                    self.get_queryset()
+                    .filter(pk=serializer.data["id"])
+                    .values(  # Required fields
+                        "id",
+                        "workspace_id",
+                        "project_id",
+                        # Model fields
+                        "name",
+                        "description",
+                        "description_text",
+                        "description_html",
+                        "start_date",
+                        "target_date",
+                        "status",
+                        "lead_id",
+                        "member_ids",
+                        "view_props",
+                        "sort_order",
+                        "external_source",
+                        "external_id",
+                        "logo_props",
+                        # computed fields
+                        "is_favorite",
+                        "cancelled_issues",
+                        "completed_issues",
+                        "total_issues",
+                        "started_issues",
+                        "unstarted_issues",
+                        "completed_estimate_points",
+                        "total_estimate_points",
+                        "backlog_issues",
+                        "created_at",
+                        "updated_at",
+                    )
+                ).first()
+
+                emit_model_event(
+                    model_name="module",
+                    model_id=str(module["id"]),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=module["workspace_id"],
+                    project_id=module["project_id"],
                 )
-            ).first()
-            # Send the model activity
-            model_activity.delay(
-                model_name="module",
-                model_id=str(module["id"]),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="module",
+                        model_id=str(module["id"]),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
+
             datetime_fields = ["created_at", "updated_at"]
             module = user_timezone_converter(module, datetime_fields, request.user.user_timezone)
             return Response(module, status=status.HTTP_201_CREATED)
@@ -669,51 +686,65 @@ class ModuleViewSet(BaseViewSet):
         serializer = ModuleWriteSerializer(current_module, data=request.data, partial=True)
 
         if serializer.is_valid():
-            serializer.save()
-            module = module_queryset.values(
-                # Required fields
-                "id",
-                "workspace_id",
-                "project_id",
-                # Model fields
-                "name",
-                "description",
-                "description_text",
-                "description_html",
-                "start_date",
-                "target_date",
-                "status",
-                "lead_id",
-                "member_ids",
-                "view_props",
-                "sort_order",
-                "external_source",
-                "external_id",
-                "logo_props",
-                # computed fields
-                "completed_estimate_points",
-                "total_estimate_points",
-                "is_favorite",
-                "cancelled_issues",
-                "completed_issues",
-                "started_issues",
-                "total_issues",
-                "unstarted_issues",
-                "backlog_issues",
-                "created_at",
-                "updated_at",
-            ).first()
+            with transaction.atomic():
+                serializer.save()
+                module = module_queryset.values(
+                    # Required fields
+                    "id",
+                    "workspace_id",
+                    "project_id",
+                    # Model fields
+                    "name",
+                    "description",
+                    "description_text",
+                    "description_html",
+                    "start_date",
+                    "target_date",
+                    "status",
+                    "lead_id",
+                    "member_ids",
+                    "view_props",
+                    "sort_order",
+                    "external_source",
+                    "external_id",
+                    "logo_props",
+                    # computed fields
+                    "completed_estimate_points",
+                    "total_estimate_points",
+                    "is_favorite",
+                    "cancelled_issues",
+                    "completed_issues",
+                    "started_issues",
+                    "total_issues",
+                    "unstarted_issues",
+                    "backlog_issues",
+                    "created_at",
+                    "updated_at",
+                ).first()
 
-            # Send the model activity
-            model_activity.delay(
-                model_name="module",
-                model_id=str(module["id"]),
-                requested_data=request.data,
-                current_instance=current_instance,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
+                emit_model_event(
+                    model_name="module",
+                    model_id=str(module["id"]),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=module["workspace_id"],
+                    project_id=module["project_id"],
+                )
+
+                # Send the model activity
+                def _dispatch_model_activity():
+                    model_activity.delay(
+                        model_name="module",
+                        model_id=str(module["id"]),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                transaction.on_commit(_dispatch_model_activity, robust=True)
 
             datetime_fields = ["created_at", "updated_at"]
             module = user_timezone_converter(module, datetime_fields, request.user.user_timezone)

@@ -10,6 +10,7 @@ import json
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import (
     Count,
     Exists,
@@ -41,6 +42,7 @@ from plane.app.serializers import (
     ProjectUserPropertySerializer,
     RecurrenceSerializer,
 )
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
 from plane.bgtasks.recent_visited_task import recent_visited_task
@@ -447,81 +449,98 @@ class IssueViewSet(BaseViewSet):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
 
-            # If a recurrence rule was supplied, persist it against this first
-            # occurrence. A daily Celery Beat task creates the rest.
-            self._create_recurrence(request, serializer.instance, project)
+                # If a recurrence rule was supplied, persist it against this first
+                # occurrence. A daily Celery Beat task creates the rest.
+                self._create_recurrence(request, serializer.instance, project)
 
-            # Track the issue
-            issue_activity.delay(
-                type="issue.activity.created",
-                requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
-                actor_id=str(request.user.id),
-                issue_id=str(serializer.data.get("id", None)),
-                project_id=str(project_id),
-                current_instance=None,
-                epoch=int(timezone.now().timestamp()),
-                notification=True,
-                origin=base_host(request=request, is_app=True),
-            )
-            queryset = self.get_queryset()
-            queryset = self.apply_annotations(queryset)
-            issue = (
-                issue_queryset_grouper(
-                    queryset=queryset.filter(pk=serializer.data["id"]),
-                    group_by=None,
-                    sub_group_by=None,
+                # Track the issue
+                issue_activity.delay(
+                    type="issue.activity.created",
+                    requested_data=json.dumps(self.request.data, cls=DjangoJSONEncoder),
+                    actor_id=str(request.user.id),
+                    issue_id=str(serializer.data.get("id", None)),
+                    project_id=str(project_id),
+                    current_instance=None,
+                    epoch=int(timezone.now().timestamp()),
+                    notification=True,
+                    origin=base_host(request=request, is_app=True),
                 )
-                .values(
-                    "id",
-                    "name",
-                    "state_id",
-                    "sort_order",
-                    "completed_at",
-                    "estimate_point",
-                    "priority",
-                    "start_date",
-                    "target_date",
-                    "sequence_id",
-                    "project_id",
-                    "parent_id",
-                    "cycle_id",
-                    "module_ids",
-                    "label_ids",
-                    "assignee_ids",
-                    "sub_issues_count",
-                    "created_at",
-                    "updated_at",
-                    "created_by",
-                    "updated_by",
-                    "attachment_count",
-                    "link_count",
-                    "is_draft",
-                    "archived_at",
-                    "deleted_at",
+                queryset = self.get_queryset()
+                queryset = self.apply_annotations(queryset)
+                issue = (
+                    issue_queryset_grouper(
+                        queryset=queryset.filter(pk=serializer.data["id"]),
+                        group_by=None,
+                        sub_group_by=None,
+                    )
+                    .values(
+                        "id",
+                        "name",
+                        "state_id",
+                        "sort_order",
+                        "completed_at",
+                        "estimate_point",
+                        "priority",
+                        "start_date",
+                        "target_date",
+                        "sequence_id",
+                        "project_id",
+                        "parent_id",
+                        "cycle_id",
+                        "module_ids",
+                        "label_ids",
+                        "assignee_ids",
+                        "sub_issues_count",
+                        "created_at",
+                        "updated_at",
+                        "created_by",
+                        "updated_by",
+                        "attachment_count",
+                        "link_count",
+                        "is_draft",
+                        "archived_at",
+                        "deleted_at",
+                    )
+                    .first()
                 )
-                .first()
-            )
-            datetime_fields = ["created_at", "updated_at"]
-            issue = user_timezone_converter(issue, datetime_fields, request.user.user_timezone)
-            # Send the model activity
-            model_activity.delay(
-                model_name="issue",
-                model_id=str(serializer.data["id"]),
-                requested_data=request.data,
-                current_instance=None,
-                actor_id=request.user.id,
-                slug=slug,
-                origin=base_host(request=request, is_app=True),
-            )
-            # updated issue description version
-            issue_description_version_task.delay(
-                updated_issue=json.dumps(request.data, cls=DjangoJSONEncoder),
-                issue_id=str(serializer.data["id"]),
-                user_id=request.user.id,
-                is_creating=True,
-            )
+                datetime_fields = ["created_at", "updated_at"]
+                issue = user_timezone_converter(issue, datetime_fields, request.user.user_timezone)
+
+                emit_model_event(
+                    model_name="issue",
+                    model_id=str(serializer.data["id"]),
+                    requested_data=request.data,
+                    current_instance=None,
+                    actor_id=request.user.id,
+                    workspace_id=project.workspace_id,
+                    project_id=project.id,
+                    instance=serializer.instance,
+                )
+
+                # Send the model activity
+                transaction.on_commit(
+                    lambda: model_activity.delay(
+                        model_name="issue",
+                        model_id=str(serializer.data["id"]),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        slug=slug,
+                        origin=base_host(request=request, is_app=True),
+                    ),
+                    robust=True,
+                )
+
+                # updated issue description version
+                issue_description_version_task.delay(
+                    updated_issue=json.dumps(request.data, cls=DjangoJSONEncoder),
+                    issue_id=str(serializer.data["id"]),
+                    user_id=request.user.id,
+                    is_creating=True,
+                )
             return Response(issue, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -715,37 +734,55 @@ class IssueViewSet(BaseViewSet):
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
         serializer = IssueCreateSerializer(issue, data=request.data, partial=True, context={"project_id": project_id})
         if serializer.is_valid():
-            serializer.save()
-            # Check if the update is a migration description update
-            is_migration_description_update = skip_activity and is_description_update
-            # Log all the updates
-            if not is_migration_description_update:
-                issue_activity.delay(
-                    type="issue.activity.updated",
-                    requested_data=requested_data,
-                    actor_id=str(request.user.id),
-                    issue_id=str(pk),
-                    project_id=str(project_id),
-                    current_instance=current_instance,
-                    epoch=int(timezone.now().timestamp()),
-                    notification=True,
-                    origin=base_host(request=request, is_app=True),
-                )
-                model_activity.delay(
-                    model_name="issue",
-                    model_id=str(serializer.data.get("id", None)),
-                    requested_data=request.data,
-                    current_instance=current_instance,
-                    actor_id=request.user.id,
-                    slug=slug,
-                    origin=base_host(request=request, is_app=True),
-                )
-                # updated issue description version
-                issue_description_version_task.delay(
-                    updated_issue=current_instance,
-                    issue_id=str(serializer.data.get("id", None)),
-                    user_id=request.user.id,
-                )
+            with transaction.atomic():
+                serializer.save()
+                # Check if the update is a migration description update
+                is_migration_description_update = skip_activity and is_description_update
+                # Log all the updates
+                if not is_migration_description_update:
+                    issue_activity.delay(
+                        type="issue.activity.updated",
+                        requested_data=requested_data,
+                        actor_id=str(request.user.id),
+                        issue_id=str(pk),
+                        project_id=str(project_id),
+                        current_instance=current_instance,
+                        epoch=int(timezone.now().timestamp()),
+                        notification=True,
+                        origin=base_host(request=request, is_app=True),
+                    )
+
+                    emit_model_event(
+                        model_name="issue",
+                        model_id=str(serializer.data.get("id", None)),
+                        requested_data=request.data,
+                        current_instance=current_instance,
+                        actor_id=request.user.id,
+                        workspace_id=issue.workspace_id,
+                        project_id=issue.project_id,
+                        instance=issue,
+                    )
+
+                    # Send the model activity
+                    transaction.on_commit(
+                        lambda: model_activity.delay(
+                            model_name="issue",
+                            model_id=str(serializer.data.get("id", None)),
+                            requested_data=request.data,
+                            current_instance=current_instance,
+                            actor_id=request.user.id,
+                            slug=slug,
+                            origin=base_host(request=request, is_app=True),
+                        ),
+                        robust=True,
+                    )
+
+                    # updated issue description version
+                    issue_description_version_task.delay(
+                        updated_issue=current_instance,
+                        issue_id=str(serializer.data.get("id", None)),
+                        user_id=request.user.id,
+                    )
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -818,14 +855,33 @@ class BulkDeleteIssuesEndpoint(BaseAPIView):
 
         total_issues = len(issues)
 
-        # First, delete all related cycle issues
-        CycleIssue.objects.filter(issue__in=issues).delete()
+        # Capture workspace_id and names before deletion while we still have the rows.
+        workspace_id = issues[0].workspace_id if total_issues else None
+        issue_names = {str(issue_id): name for issue_id, name in issues.values_list("id", "name")}
 
-        # Then, delete all related module issues
-        ModuleIssue.objects.filter(issue__in=issues).delete()
+        with transaction.atomic():
+            # First, delete all related cycle issues
+            CycleIssue.objects.filter(issue__in=issues).delete()
 
-        # Finally, delete the issues themselves
-        issues.delete()
+            # Then, delete all related module issues
+            ModuleIssue.objects.filter(issue__in=issues).delete()
+
+            # Finally, delete the issues themselves
+            issues.delete()
+
+            # Emit one outbox delete event per issue so consumers learn of
+            # each deletion individually — matches the per-entity contract
+            # of every other mutation path.
+            if workspace_id:
+                for issue_id in issue_ids:
+                    emit_delete_event(
+                        model_name="issue",
+                        entity_id=issue_id,
+                        actor_id=request.user.id,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        entity_name=issue_names.get(str(issue_id)),
+                    )
 
         return Response(
             {"message": f"{total_issues} issues were deleted"},
@@ -1213,8 +1269,27 @@ class IssueBulkUpdateDateEndpoint(BaseAPIView):
                 issue.target_date = target_date
                 issues_to_update.append(issue)
 
-        # Bulk update issues
-        Issue.objects.bulk_update(issues_to_update, ["start_date", "target_date"])
+        # Bulk update issues and emit one outbox event per modified issue.
+        # Wrap in a transaction so the DB writes and the outbox rows are
+        # atomic — a rollback won't leave orphaned event rows.
+        with transaction.atomic():
+            Issue.objects.bulk_update(issues_to_update, ["start_date", "target_date"])
+
+            for issue in issues_to_update:
+                requested = {}
+                if issue.start_date is not None:
+                    requested["start_date"] = str(issue.start_date)
+                if issue.target_date is not None:
+                    requested["target_date"] = str(issue.target_date)
+                emit_model_event(
+                    model_name="issue",
+                    model_id=str(issue.id),
+                    requested_data=requested,
+                    current_instance=None,  # diff already sent via issue_activity; snapshot only
+                    actor_id=request.user.id,
+                    workspace_id=issue.workspace_id,
+                    project_id=issue.project_id,
+                )
 
         return Response({"message": "Issues updated successfully"}, status=status.HTTP_200_OK)
 

@@ -20,10 +20,11 @@ from uuid import uuid4
 from plane.bgtasks.cleanup_task import (
     delete_api_logs,
     delete_email_notification_logs,
+    delete_event_logs,
     delete_webhook_logs,
     process_cleanup_task,
 )
-from plane.db.models import APIActivityLog, EmailNotificationLog, WebhookLog
+from plane.db.models import APIActivityLog, EmailNotificationLog, EventLog, WebhookLog
 from plane.tests.factories import UserFactory, WorkspaceFactory
 
 
@@ -48,6 +49,17 @@ def _make_webhook_log(workspace, created_at):
         response_status="200",
     )
     WebhookLog.all_objects.filter(pk=log.pk).update(created_at=created_at)
+    return log
+
+
+def _make_event_log(workspace, occurred_at):
+    log = EventLog.objects.create(
+        workspace=workspace,
+        entity_type="project",
+        entity_id=uuid4(),
+        event_type="project.created",
+        occurred_at=occurred_at,
+    )
     return log
 
 
@@ -102,6 +114,28 @@ class TestDeleteWebhookLogs:
         delete_webhook_logs()
 
         assert WebhookLog.all_objects.filter(pk=recent.pk).exists()
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+class TestDeleteEventLogs:
+    def test_expired_events_are_hard_deleted(self):
+        workspace = WorkspaceFactory()
+        retention_days = settings.EVENT_LOG_RETENTION_DAYS
+        expired = _make_event_log(workspace, timezone.now() - timedelta(days=retention_days + 1))
+
+        delete_event_logs()
+
+        assert not EventLog.all_objects.filter(pk=expired.pk).exists()
+
+    def test_recent_events_are_retained(self):
+        workspace = WorkspaceFactory()
+        retention_days = settings.EVENT_LOG_RETENTION_DAYS
+        recent = _make_event_log(workspace, timezone.now() - timedelta(days=retention_days - 1))
+
+        delete_event_logs()
+
+        assert EventLog.all_objects.filter(pk=recent.pk).exists()
 
 
 @pytest.mark.unit

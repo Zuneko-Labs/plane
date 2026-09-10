@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import json
+
 # Django imports
-from django.db import IntegrityError
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import IntegrityError, transaction
 
 # Third party imports
 from rest_framework import status
@@ -13,6 +16,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 # Module imports
 from plane.api.serializers import StateSerializer
 from plane.app.permissions import ProjectEntityPermission
+from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import Issue, State
 from .base import BaseAPIView
 from plane.utils.openapi import (
@@ -110,7 +114,19 @@ class StateListCreateAPIEndpoint(BaseAPIView):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-                serializer.save(project_id=project_id)
+                with transaction.atomic():
+                    serializer.save(project_id=project_id)
+                    state = serializer.instance
+
+                    emit_model_event(
+                        model_name="state",
+                        model_id=str(state.id),
+                        requested_data=request.data,
+                        current_instance=None,
+                        actor_id=request.user.id,
+                        workspace_id=state.workspace_id,
+                        project_id=state.project_id,
+                    )
                 return Response(serializer.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except IntegrityError:
@@ -245,7 +261,18 @@ class StateDetailAPIEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        state.delete()
+        with transaction.atomic():
+            state_name = state.name
+            state.delete()
+
+            emit_delete_event(
+                model_name="state",
+                entity_id=str(state_id),
+                actor_id=request.user.id,
+                workspace_id=state.workspace_id,
+                project_id=state.project_id,
+                entity_name=state_name,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @state_docs(
@@ -276,6 +303,7 @@ class StateDetailAPIEndpoint(BaseAPIView):
         Validates external ID uniqueness if provided.
         """
         state = State.objects.get(workspace__slug=slug, project_id=project_id, pk=state_id)
+        current_instance = json.dumps(StateSerializer(state).data, cls=DjangoJSONEncoder)
         serializer = StateSerializer(state, data=request.data, partial=True)
         if serializer.is_valid():
             if (
@@ -295,6 +323,17 @@ class StateDetailAPIEndpoint(BaseAPIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+
+                emit_model_event(
+                    model_name="state",
+                    model_id=str(state.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=state.workspace_id,
+                    project_id=state.project_id,
+                )
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

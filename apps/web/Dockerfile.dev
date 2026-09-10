@@ -5,7 +5,7 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 COPY . .
-RUN corepack enable pnpm && pnpm add -g turbo
+RUN corepack enable pnpm
 RUN pnpm install
 
 EXPOSE 3000

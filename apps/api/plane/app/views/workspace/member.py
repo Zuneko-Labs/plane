@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import json
+
 # Django imports
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.db.models import Count, Q, OuterRef, Subquery, IntegerField
 from django.utils import timezone
 from django.db.models.functions import Coalesce
@@ -16,15 +20,48 @@ from plane.app.permissions import WorkspaceEntityPermission, allow_permission, R
 # Module imports
 from plane.app.serializers import (
     ProjectMemberRoleSerializer,
+    ProjectMemberSerializer,
     WorkspaceMemberAdminSerializer,
     WorkspaceMemberMeSerializer,
     WorkSpaceMemberSerializer,
 )
 from plane.app.views.base import BaseAPIView
+from plane.bgtasks.event_outbox import emit_model_event, emit_delete_event
 from plane.db.models import Project, ProjectMember, WorkspaceMember, DraftIssue
 from plane.utils.cache import invalidate_cache
 
 from .. import BaseViewSet
+
+
+def _bulk_update_project_members_and_emit(*, queryset, update_kwargs, requested_data, actor_id):
+    """
+    Bulk-update ``ProjectMember`` rows and emit one ``project_member``
+    outbox event per affected row.
+
+    A plain ``queryset.update(**update_kwargs)`` (as used to exist here)
+    writes no outbox rows at all, unlike the individual mutation paths in
+    project/member.py — incremental-sync consumers would see e.g. the
+    workspace_member deactivation but keep the user as an active member of
+    every project. Snapshot affected rows before the bulk update (for the
+    outbox "before" state), then update, then emit per row.
+    """
+    affected = list(queryset)
+    if not affected:
+        return
+
+    before_by_id = {member.id: ProjectMemberSerializer(member).data for member in affected}
+    queryset.model.objects.filter(pk__in=[member.id for member in affected]).update(**update_kwargs)
+
+    for member in affected:
+        emit_model_event(
+            model_name="project_member",
+            model_id=str(member.id),
+            requested_data=requested_data,
+            current_instance=json.dumps(before_by_id[member.id], cls=DjangoJSONEncoder),
+            actor_id=actor_id,
+            workspace_id=member.workspace_id,
+            project_id=member.project_id,
+        )
 
 
 class WorkSpaceMemberViewSet(BaseViewSet):
@@ -84,14 +121,32 @@ class WorkSpaceMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # If a user is moved to a guest role he can't have any other role in projects
-        if "role" in request.data and int(request.data.get("role")) == 5:
-            ProjectMember.objects.filter(workspace__slug=slug, member_id=workspace_member.member_id).update(role=5)
-
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
         serializer = WorkSpaceMemberSerializer(workspace_member, data=request.data, partial=True)
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+
+                emit_model_event(
+                    model_name="workspace_member",
+                    model_id=str(workspace_member.id),
+                    requested_data=request.data,
+                    current_instance=current_instance,
+                    actor_id=request.user.id,
+                    workspace_id=workspace_member.workspace_id,
+                )
+
+                # If a user is moved to a guest role he can't have any other role in projects
+                if "role" in request.data and int(request.data.get("role")) == 5:
+                    _bulk_update_project_members_and_emit(
+                        queryset=ProjectMember.objects.filter(
+                            workspace__slug=slug, member_id=workspace_member.member_id
+                        ),
+                        update_kwargs={"role": 5},
+                        requested_data={"role": 5},
+                        actor_id=request.user.id,
+                    )
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -140,13 +195,30 @@ class WorkSpaceMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Deactivate the users from the projects where the user is part of
-        _ = ProjectMember.objects.filter(
-            workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
-        ).update(is_active=False, updated_at=timezone.now())
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
 
-        workspace_member.is_active = False
-        workspace_member.save()
+        with transaction.atomic():
+            # Deactivate the users from the projects where the user is part of
+            _bulk_update_project_members_and_emit(
+                queryset=ProjectMember.objects.filter(
+                    workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
+                ),
+                update_kwargs={"is_active": False, "updated_at": timezone.now()},
+                requested_data={"is_active": False},
+                actor_id=request.user.id,
+            )
+
+            workspace_member.is_active = False
+            workspace_member.save()
+
+            emit_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @invalidate_cache(
@@ -194,14 +266,31 @@ class WorkSpaceMemberViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # # Deactivate the users from the projects where the user is part of
-        _ = ProjectMember.objects.filter(
-            workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
-        ).update(is_active=False, updated_at=timezone.now())
+        current_instance = json.dumps(WorkSpaceMemberSerializer(workspace_member).data, cls=DjangoJSONEncoder)
 
-        # # Deactivate the user
-        workspace_member.is_active = False
-        workspace_member.save()
+        with transaction.atomic():
+            # # Deactivate the users from the projects where the user is part of
+            _bulk_update_project_members_and_emit(
+                queryset=ProjectMember.objects.filter(
+                    workspace__slug=slug, member_id=workspace_member.member_id, is_active=True
+                ),
+                update_kwargs={"is_active": False, "updated_at": timezone.now()},
+                requested_data={"is_active": False},
+                actor_id=request.user.id,
+            )
+
+            # # Deactivate the user
+            workspace_member.is_active = False
+            workspace_member.save()
+
+            emit_model_event(
+                model_name="workspace_member",
+                model_id=str(workspace_member.id),
+                requested_data={"is_active": False},
+                current_instance=current_instance,
+                actor_id=request.user.id,
+                workspace_id=workspace_member.workspace_id,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

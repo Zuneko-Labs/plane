@@ -5,6 +5,10 @@
 # Third party imports
 from rest_framework import serializers
 
+from django.core.exceptions import ObjectDoesNotExist
+
+from plane.utils.exception_logger import log_exception
+
 
 class BaseSerializer(serializers.ModelSerializer):
     """
@@ -72,47 +76,70 @@ class BaseSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         response = super().to_representation(instance)
 
-        # Ensure 'expand' is iterable before processing
-        if self.expand:
-            for expand in self.expand:
-                if expand in self.fields:
-                    # Import all the expandable serializers
-                    from . import (
-                        IssueSerializer,
-                        IssueLiteSerializer,
-                        ProjectLiteSerializer,
-                        StateLiteSerializer,
-                        UserLiteSerializer,
-                        WorkspaceLiteSerializer,
-                        EstimatePointSerializer,
-                    )
+        # Only expand fields explicitly requested by the caller via ?expand=.
+        # Expanding unconditionally causes N+1 queries on every response and
+        # breaks clients that expect UUID scalars where they requested none.
+        if not self.expand:
+            return response
 
-                    # Expansion mapper
-                    expansion = {
-                        "user": UserLiteSerializer,
-                        "workspace": WorkspaceLiteSerializer,
-                        "project": ProjectLiteSerializer,
-                        "default_assignee": UserLiteSerializer,
-                        "project_lead": UserLiteSerializer,
-                        "state": StateLiteSerializer,
-                        "created_by": UserLiteSerializer,
-                        "updated_by": UserLiteSerializer,
-                        "issue": IssueSerializer,
-                        "actor": UserLiteSerializer,
-                        "owned_by": UserLiteSerializer,
-                        "members": UserLiteSerializer,
-                        "parent": IssueLiteSerializer,
-                        "estimate_point": EstimatePointSerializer,
-                    }
-                    # Check if field in expansion  then expand the field
-                    if expand in expansion:
-                        if isinstance(response.get(expand), list):
-                            exp_serializer = expansion[expand](getattr(instance, expand), many=True)
-                        else:
-                            exp_serializer = expansion[expand](getattr(instance, expand))
-                        response[expand] = exp_serializer.data
-                    else:
-                        # You might need to handle this case differently
-                        response[expand] = getattr(instance, f"{expand}_id", None)
+        # Import all the expandable serializers
+        from . import (
+            IssueSerializer,
+            IssueLiteSerializer,
+            ProjectLiteSerializer,
+            StateLiteSerializer,
+            UserLiteSerializer,
+            WorkspaceLiteSerializer,
+            EstimatePointSerializer,
+        )
+
+        # Expansion mapper — maps field name → serializer class.
+        expansion = {
+            "user": UserLiteSerializer,
+            "workspace": WorkspaceLiteSerializer,
+            "project": ProjectLiteSerializer,
+            "default_assignee": UserLiteSerializer,
+            "project_lead": UserLiteSerializer,
+            "lead": UserLiteSerializer,
+            "state": StateLiteSerializer,
+            "created_by": UserLiteSerializer,
+            "updated_by": UserLiteSerializer,
+            "issue": IssueSerializer,
+            "actor": UserLiteSerializer,
+            "owned_by": UserLiteSerializer,
+            "members": UserLiteSerializer,
+            "parent": IssueLiteSerializer,
+            "estimate_point": EstimatePointSerializer,
+        }
+
+        for field_name in self.expand:
+            # Only expand fields that (a) are declared on this serializer,
+            # (b) are not write-only (write-only fields have no place in
+            # the response and the instance attribute may not be the
+            # representation the client expects), and (c) are in the map.
+            if field_name not in self.fields:
+                continue
+            if self.fields[field_name].write_only:
+                continue
+            if field_name not in expansion:
+                response[field_name] = getattr(instance, f"{field_name}_id", None)
+                continue
+            if not hasattr(instance, field_name):
+                continue
+
+            expand_serializer = expansion[field_name]
+            value = getattr(instance, field_name)
+            if value is None:
+                continue
+
+            try:
+                if hasattr(value, "all"):
+                    response[field_name] = expand_serializer(value.all(), many=True).data
+                elif isinstance(response.get(field_name), list):
+                    response[field_name] = expand_serializer(value, many=True).data
+                else:
+                    response[field_name] = expand_serializer(value).data
+            except ObjectDoesNotExist as e:
+                log_exception(e)
 
         return response

@@ -10,9 +10,15 @@ from plane.api.views import (
     ModuleIssueListCreateAPIEndpoint,
     ModuleIssueDetailAPIEndpoint,
     ModuleArchiveUnarchiveAPIEndpoint,
+    WorkspaceModuleListAPIEndpoint,
 )
 
 urlpatterns = [
+    path(
+        "workspaces/<str:slug>/modules/",
+        WorkspaceModuleListAPIEndpoint.as_view(http_method_names=["get"]),
+        name="workspace-modules",
+    ),
     path(
         "workspaces/<str:slug>/projects/<uuid:project_id>/modules/",
         ModuleListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
