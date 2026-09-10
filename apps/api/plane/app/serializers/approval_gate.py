@@ -11,16 +11,21 @@ from .base import BaseSerializer
 
 class ApprovalGateConfigSerializer(BaseSerializer):
     pending_approval_state_id = serializers.PrimaryKeyRelatedField(
-        source="pending_approval_state", queryset=State.objects.all()
+        source="pending_approval_state", queryset=State.objects.all(), required=False, allow_null=True
     )
-    approved_state_id = serializers.PrimaryKeyRelatedField(source="approved_state", queryset=State.objects.all())
-    sent_back_state_id = serializers.PrimaryKeyRelatedField(source="sent_back_state", queryset=State.objects.all())
+    approved_state_id = serializers.PrimaryKeyRelatedField(
+        source="approved_state", queryset=State.objects.all(), required=False, allow_null=True
+    )
+    sent_back_state_id = serializers.PrimaryKeyRelatedField(
+        source="sent_back_state", queryset=State.objects.all(), required=False, allow_null=True
+    )
 
     class Meta:
         model = ApprovalGateConfig
         fields = [
             "id",
             "project",
+            "is_enabled",
             "pending_approval_state_id",
             "approved_state_id",
             "sent_back_state_id",
@@ -72,6 +77,12 @@ class ApprovalGateConfigSerializer(BaseSerializer):
                     f'That state is already the registration hand-off trigger state — entering it already requires '
                     f"naming an agent. Pick a different state for {seen[handoff_trigger_id]}."
                 )
+
+        is_enabled = attrs.get("is_enabled", getattr(self.instance, "is_enabled", True))
+        if is_enabled and approved is None and sent_back is None:
+            raise serializers.ValidationError(
+                "Turn the gate off, or pick at least an Approved or a Sent Back state for it to gate."
+            )
 
         return attrs
 

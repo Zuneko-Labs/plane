@@ -5,6 +5,7 @@
 # Django imports
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 # Module imports
 from .project import ProjectBaseModel
@@ -20,32 +21,53 @@ class ApprovalGateConfig(ProjectBaseModel):
     move a work item into `approved_state` or `sent_back_state`.
     `pending_approval_state` stays open to anyone entering it, but triggers
     an approver notification.
+
+    On by default for every project (`is_enabled=True`), with the three
+    states nullable so a row can exist purely to carry the toggle even
+    before every role is mapped, or to record `is_enabled=False` overriding
+    the name-alias fallback in plane.utils.approval.
     """
 
+    is_enabled = models.BooleanField(default=True)
     pending_approval_state = models.OneToOneField(
         "db.State",
         on_delete=models.CASCADE,
         related_name="+",
+        null=True,
+        blank=True,
     )
     approved_state = models.OneToOneField(
         "db.State",
         on_delete=models.CASCADE,
         related_name="+",
+        null=True,
+        blank=True,
     )
     sent_back_state = models.OneToOneField(
         "db.State",
         on_delete=models.CASCADE,
         related_name="+",
+        null=True,
+        blank=True,
     )
 
     def __str__(self):
-        return f"{self.project.name} -> {self.approved_state.name}/{self.sent_back_state.name}"
+        approved_name = self.approved_state.name if self.approved_state_id else "-"
+        sent_back_name = self.sent_back_state.name if self.sent_back_state_id else "-"
+        return f"{self.project.name} -> {approved_name}/{sent_back_name}"
 
     class Meta:
         verbose_name = "Approval Gate Config"
         verbose_name_plural = "Approval Gate Configs"
         db_table = "approval_gate_configs"
         ordering = ("project",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project"],
+                condition=Q(deleted_at__isnull=True),
+                name="approval_gate_config_unique_project_when_deleted_at_null",
+            )
+        ]
 
 
 class ApprovalRecord(ProjectBaseModel):

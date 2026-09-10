@@ -36,20 +36,24 @@ class ApprovalGateConfigViewSet(BaseViewSet):
             serializer = ApprovalGateConfigSerializer(configs, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
-        # No explicit override: fall back to the zero-config default (name
-        # aliases covering both the ticket's naming and the client's actual
-        # department workflows) so the state picker and Sent Back modal work
-        # out of the box, same as the server-side gate itself (see
-        # plane.utils.approval). Sent Back is optional — none of the
-        # client's real workflows model a rejection step, so a project
-        # without one still gets Pending Approval / Approved gating.
+        # No explicit row (should be rare — every project gets one on
+        # creation, and existing ones were backfilled): fall back to the
+        # zero-config default (name aliases covering both the ticket's
+        # naming and the client's actual department workflows) so the state
+        # picker and Sent Back modal work out of the box, same as the
+        # server-side gate itself (see plane.utils.approval). Always
+        # reported as enabled — there is no row to say otherwise. Sent Back
+        # is optional — none of the client's real workflows model a
+        # rejection step, so a project without one still gets Pending
+        # Approval / Approved gating.
         pending_id, approved_id, sent_back_id = resolve_gate_state_ids(project_id)
-        if pending_id and approved_id:
+        if pending_id or approved_id or sent_back_id:
             return Response(
                 [
                     {
                         "id": None,
                         "project": str(project_id),
+                        "is_enabled": True,
                         "pending_approval_state_id": pending_id,
                         "approved_state_id": approved_id,
                         "sent_back_state_id": sent_back_id,
@@ -62,11 +66,27 @@ class ApprovalGateConfigViewSet(BaseViewSet):
     @allow_permission([ROLE.ADMIN])
     def create(self, request, slug, project_id):
         project = Project.objects.get(pk=project_id, workspace__slug=slug)
-        serializer = ApprovalGateConfigSerializer(data=request.data, context={"project_id": project_id})
+        # Upsert: a project should have at most one config row (see the
+        # unique constraint on ApprovalGateConfig.project). The frontend
+        # toggle/save flow always posts here first when it only has a
+        # synthesized (id=None) config to work from, so route it to an
+        # update when a row already exists instead of failing the insert.
+        existing = self.get_queryset().first()
+        if existing:
+            serializer = ApprovalGateConfigSerializer(
+                existing, data=request.data, partial=True, context={"project_id": project_id}
+            )
+            status_code = status.HTTP_200_OK
+        else:
+            serializer = ApprovalGateConfigSerializer(data=request.data, context={"project_id": project_id})
+            status_code = status.HTTP_201_CREATED
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        config = serializer.save(project=project, workspace_id=project.workspace_id)
-        return Response(ApprovalGateConfigSerializer(config).data, status=status.HTTP_201_CREATED)
+        if existing:
+            config = serializer.save()
+        else:
+            config = serializer.save(project=project, workspace_id=project.workspace_id)
+        return Response(ApprovalGateConfigSerializer(config).data, status=status_code)
 
     @allow_permission([ROLE.ADMIN])
     def partial_update(self, request, slug, project_id, pk):

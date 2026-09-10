@@ -15,26 +15,16 @@ import type { i18n as I18nInstance } from "i18next";
 
 export const i18nInstance: I18nInstance = i18n.createInstance();
 
-// Locale JSON ships as static assets alongside the bundled chunk, so the base URL
-// is resolved from the module URL at runtime.
-const LOCALES_BASE_URL = new URL("./locales/", import.meta.url);
-
+// A template-literal dynamic import (not a runtime-computed URL string) so bundlers
+// like Vite can statically analyze and glob-bundle the JSON at build time — a computed
+// `new URL(...).href` import is opaque to them and breaks once this package goes through
+// dependency pre-bundling, where import.meta.url no longer points at the real package
+// directory. packages/i18n/locales is a symlink to src/locales, one level above dist/,
+// which is what "../locales" resolves to from the built dist/index.js.
 i18nInstance
   .use(ICU)
   .use(initReactI18next)
-  .use(
-    resourcesToBackend(async (language: string, namespace: string) => {
-      // Fetched rather than dynamically imported: the bundler leaves this path to be
-      // resolved at runtime, and browsers refuse to execute a JSON response as an ES
-      // module without an import attribute. That rejection is swallowed by the
-      // backend, leaving i18next with no resources and rendering raw keys.
-      const response = await fetch(new URL(`${language}/${namespace}.json`, LOCALES_BASE_URL).href);
-      if (!response.ok) {
-        throw new Error(`Failed to load locale ${language}/${namespace}: ${response.status}`);
-      }
-      return response.json();
-    })
-  );
+  .use(resourcesToBackend((language: string, namespace: string) => import(`../locales/${language}/${namespace}.json`)));
 
 const initialLng =
   typeof window !== "undefined" ? localStorage.getItem(LANGUAGE_STORAGE_KEY) || FALLBACK_LANGUAGE : FALLBACK_LANGUAGE;

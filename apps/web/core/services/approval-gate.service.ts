@@ -12,18 +12,23 @@ import { APIService } from "@/services/api.service";
 export type TApprovalGateConfig = {
   id: string | null;
   project: string;
-  pending_approval_state_id: string;
-  approved_state_id: string;
-  // null on projects whose workflow has no rejection step — none of the
-  // client's real department workflows model one (see
-  // apply_department_workflows.py) — so Sent Back gating simply doesn't
+  // On by default for every project — see DEFAULT_APPROVAL_GATE_STATES on
+  // the backend. Turning it off switches the gate off entirely, not just
+  // the states below.
+  is_enabled: boolean;
+  // null until a role resolves — either nothing is configured/matched yet,
+  // or (for sent_back) the project's workflow has no rejection step at all
+  // (see apply_department_workflows.py), so that gating simply doesn't
   // apply there until a matching state is added.
+  pending_approval_state_id: string | null;
+  approved_state_id: string | null;
   sent_back_state_id: string | null;
 };
 
 export type TApprovalGateConfigPayload = {
-  pending_approval_state_id: string;
-  approved_state_id: string;
+  is_enabled?: boolean;
+  pending_approval_state_id?: string | null;
+  approved_state_id?: string | null;
   sent_back_state_id?: string | null;
 };
 
@@ -39,6 +44,12 @@ export type TApprovalRecord = {
   comment: string | null;
   created_at: string;
 };
+
+// Shared SWR key: both the settings editor and every read-only consumer
+// (state dropdown, sent-back modal, kanban drop) must key off the same
+// cache entry, or saving in settings never revalidates the consumers.
+export const approvalGateConfigSWRKey = (workspaceSlug: string, projectId: string) =>
+  `APPROVAL_GATE_CONFIG_${workspaceSlug}_${projectId}`;
 
 export class ApprovalGateService extends APIService {
   constructor() {

@@ -45,12 +45,13 @@ function ApprovalQueuePage({ params }: { params: PageParams }) {
     );
   }
 
-  if (!config || !config.pending_approval_state_id) {
+  if (!config || !config.is_enabled || !config.pending_approval_state_id || !config.approved_state_id) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
         <h3 className="text-lg font-medium text-primary">Approval gate not configured</h3>
         <p className="text-13 text-tertiary">
-          Set up the approval gate in project settings &rarr; Automations to use this feature.
+          Turn on the approval gate in project settings &rarr; Automations, with a Pending Approval and an Approved
+          state, to use this feature.
         </p>
       </div>
     );

@@ -93,6 +93,18 @@ DEFAULT_STATES = [
 ]
 
 
+# Default handover-approval-gate role mapping over DEFAULT_STATES — see
+# plane.utils.approval and the ApprovalGateConfig auto-created alongside
+# DEFAULT_STATES on project creation. Kept here, next to DEFAULT_STATES, as
+# the one place both the project-create views and the backfill migration
+# read from.
+DEFAULT_APPROVAL_GATE_STATES = {
+    "pending_approval": "Closed",
+    "approved": "Excel entry and Handover",
+    "sent_back": "Xerox and Binding",
+}
+
+
 class StateManager(SoftDeletionManager):
     """Default manager - excludes triage states"""
 
