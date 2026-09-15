@@ -4,8 +4,11 @@
  * See the LICENSE file for details.
  */
 
+/* eslint-disable jsx-a11y/prefer-tag-over-role -- these divs wrap dropdown triggers that render their own
+   <button>; using a real <button> here would nest button-in-button, which is invalid HTML */
+
 import type { SyntheticEvent } from "react";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { xor } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
@@ -14,6 +17,7 @@ import { Paperclip } from "lucide-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
 import { LinkIcon, StartDatePropertyIcon, ViewsIcon, DueDatePropertyIcon } from "@plane/propel/icons";
+import { setToast } from "@plane/propel/toast";
 import { Tooltip } from "@plane/propel/tooltip";
 import type { TIssue, IIssueDisplayProperties, TIssuePriorities } from "@plane/types";
 // ui
@@ -25,6 +29,8 @@ import {
   shouldHighlightIssueDueDate,
 } from "@plane/utils";
 // components
+import { ApprovalSentBackModal } from "@/components/issues/approval-sent-back-modal";
+import { RegistrationAgentModal } from "@/components/issues/registration-agent-modal";
 import { CycleDropdown } from "@/components/dropdowns/cycle";
 import { DateDropdown } from "@/components/dropdowns/date";
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
@@ -40,13 +46,20 @@ import { useLabel } from "@/hooks/store/use-label";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
 import { useAppRouter } from "@/hooks/use-app-router";
+import { useApprovalGateConfig, SENT_FOR_APPROVAL_TOAST } from "@/hooks/use-approval-gate-config";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import { usePlatformOS } from "@/hooks/use-platform-os";
+import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
 // plane web components
 import { WorkItemLayoutAdditionalProperties } from "@/plane-web/components/issues/issue-layouts/additional-properties";
 // local components
 import { IssuePropertyLabels } from "./labels";
 import { WithDisplayPropertiesHOC } from "./with-display-properties-HOC";
+
+const handleEventPropagation = (e: SyntheticEvent<HTMLDivElement>) => {
+  e.stopPropagation();
+  e.preventDefault();
+};
 
 export interface IIssueProperties {
   issue: TIssue;
@@ -80,6 +93,17 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
   // router
   const router = useAppRouter();
   const { workspaceSlug, projectId } = useParams();
+  const workspaceSlugStr = workspaceSlug?.toString();
+  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(
+    workspaceSlugStr,
+    issue.project_id ?? undefined
+  );
+  const { isSentBackTransition, isSendForApprovalTransition } = useApprovalGateConfig(
+    workspaceSlugStr,
+    issue.project_id ?? undefined
+  );
+  const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
+  const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
 
   // derived values
   const stateDetails = getStateById(issue.state_id);
@@ -108,7 +132,20 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
   );
 
   const handleState = async (stateId: string) => {
-    if (updateIssue) await updateIssue(issue.project_id, issue.id, { state_id: stateId });
+    if (!updateIssue) return;
+    // Only the first handoff needs an agent; a work item that already has
+    // one keeps it on re-entry.
+    if (isGatedState(stateId) && !issue.has_registration_handoff) {
+      setPendingRegistrationStateId(stateId);
+      return;
+    }
+    if (isSentBackTransition(issue.state_id, stateId)) {
+      setPendingSentBackStateId(stateId);
+      return;
+    }
+    const sendsForApproval = isSendForApprovalTransition(issue.state_id, stateId);
+    await updateIssue(issue.project_id, issue.id, { state_id: stateId });
+    if (sendsForApproval) setToast(SENT_FOR_APPROVAL_TOAST);
   };
 
   const handlePriority = async (value: TIssuePriorities) => {
@@ -186,17 +223,19 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
   const minDate = getDate(issue.start_date);
   const maxDate = getDate(issue.target_date);
 
-  const handleEventPropagation = (e: SyntheticEvent<HTMLDivElement>) => {
-    e.stopPropagation();
-    e.preventDefault();
-  };
-
   return (
     <div className={className}>
       {/* basic properties */}
       {/* state */}
       <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="state">
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <StateDropdown
             buttonContainerClassName="truncate max-w-40"
             value={issue.state_id}
@@ -212,7 +251,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
 
       {/* priority */}
       <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="priority">
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <PriorityDropdown
             value={issue?.priority}
             onChange={handlePriority}
@@ -230,7 +276,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         displayPropertyKey={["start_date", "due_date"]}
         shouldRenderProperty={() => isDateRangeEnabled}
       >
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <DateRangeDropdown
             value={{
               from: getDate(issue.start_date) || undefined,
@@ -265,7 +318,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         displayPropertyKey="start_date"
         shouldRenderProperty={() => !isDateRangeEnabled}
       >
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <DateDropdown
             value={issue.start_date ?? null}
             onChange={handleStartDate}
@@ -288,7 +348,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         displayPropertyKey="due_date"
         shouldRenderProperty={() => !isDateRangeEnabled}
       >
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <DateDropdown
             value={issue?.target_date ?? null}
             onChange={handleTargetDate}
@@ -311,7 +378,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
 
       {/* assignee */}
       <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="assignee">
-        <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+        <div
+          className="h-5"
+          role="button"
+          tabIndex={0}
+          onFocus={handleEventPropagation}
+          onClick={handleEventPropagation}
+          onKeyDown={handleEventPropagation}
+        >
           <MemberDropdown
             projectId={issue?.project_id}
             value={issue?.assignee_ids}
@@ -335,7 +409,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             {/* modules */}
             {projectDetails?.module_view && (
               <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="modules">
-                <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+                <div
+                  className="h-5"
+                  role="button"
+                  tabIndex={0}
+                  onFocus={handleEventPropagation}
+                  onClick={handleEventPropagation}
+                  onKeyDown={handleEventPropagation}
+                >
                   <ModuleDropdown
                     buttonContainerClassName="truncate max-w-40"
                     projectId={issue?.project_id}
@@ -355,7 +436,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             {/* cycles */}
             {projectDetails?.cycle_view && (
               <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="cycle">
-                <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+                <div
+                  className="h-5"
+                  role="button"
+                  tabIndex={0}
+                  onFocus={handleEventPropagation}
+                  onClick={handleEventPropagation}
+                  onKeyDown={handleEventPropagation}
+                >
                   <CycleDropdown
                     buttonContainerClassName="truncate max-w-40"
                     projectId={issue?.project_id}
@@ -376,7 +464,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
       {/* estimates */}
       {projectId && areEstimateEnabledByProjectId(projectId?.toString()) && (
         <WithDisplayPropertiesHOC displayProperties={displayProperties} displayPropertyKey="estimate">
-          <div className="h-5" onFocus={handleEventPropagation} onClick={handleEventPropagation}>
+          <div
+            className="h-5"
+            role="button"
+            tabIndex={0}
+            onFocus={handleEventPropagation}
+            onClick={handleEventPropagation}
+            onKeyDown={handleEventPropagation}
+          >
             <EstimateDropdown
               value={issue.estimate_point ?? undefined}
               onChange={handleEstimate}
@@ -405,12 +500,15 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             renderByDefault={false}
           >
             <div
+              role="button"
+              tabIndex={0}
               onFocus={handleEventPropagation}
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
                 if (subIssueCount) redirectToIssueDetail();
               }}
+              onKeyDown={handleEventPropagation}
               className={cn(
                 "flex h-5 flex-shrink-0 items-center justify-center gap-2 overflow-hidden rounded-sm border-[0.5px] border-strong px-2.5 py-1",
                 {
@@ -439,8 +537,11 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         >
           <div
             className="flex h-5 flex-shrink-0 items-center justify-center gap-2 overflow-hidden rounded-sm border-[0.5px] border-strong px-2.5 py-1"
+            role="button"
+            tabIndex={0}
             onFocus={handleEventPropagation}
             onClick={handleEventPropagation}
+            onKeyDown={handleEventPropagation}
           >
             <Paperclip className="h-3 w-3 flex-shrink-0" strokeWidth={2} />
             <div className="text-caption-sm-regular">{issue.attachment_count}</div>
@@ -462,8 +563,11 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         >
           <div
             className="flex h-5 flex-shrink-0 items-center justify-center gap-2 overflow-hidden rounded-sm border-[0.5px] border-strong px-2.5 py-1"
+            role="button"
+            tabIndex={0}
             onFocus={handleEventPropagation}
             onClick={handleEventPropagation}
+            onKeyDown={handleEventPropagation}
           >
             <LinkIcon className="h-3 w-3 flex-shrink-0" strokeWidth={2} />
             <div className="text-caption-sm-regular">{issue.link_count}</div>
@@ -487,6 +591,41 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
           maxRender={3}
         />
       </WithDisplayPropertiesHOC>
+
+      <RegistrationAgentModal
+        isOpen={!!pendingRegistrationStateId}
+        handleClose={() => setPendingRegistrationStateId(null)}
+        workspaceSlug={workspaceSlugStr ?? ""}
+        projectId={issue.project_id ?? ""}
+        eligibleAgentIds={eligibleAgentIds}
+        onSubmit={async (agentId) => {
+          if (!updateIssue || !pendingRegistrationStateId) return;
+          await updateIssue(issue.project_id, issue.id, {
+            state_id: pendingRegistrationStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.registration_handoff).
+            registration_agent_id: agentId,
+            // The PATCH returns 204 with no body, and the store only applies
+            // the keys we send — so mirror the record the server just wrote,
+            // otherwise the next state change re-prompts for an agent.
+            has_registration_handoff: true,
+          } as Partial<TIssue>);
+        }}
+      />
+
+      <ApprovalSentBackModal
+        isOpen={!!pendingSentBackStateId}
+        handleClose={() => setPendingSentBackStateId(null)}
+        onSubmit={async (commentHtml) => {
+          if (!updateIssue || !pendingSentBackStateId) return;
+          await updateIssue(issue.project_id, issue.id, {
+            state_id: pendingSentBackStateId,
+            // Not a TIssue field — a one-shot instruction the backend reads
+            // off the raw request body (see plane.utils.approval).
+            approval_comment_html: commentHtml,
+          } as Partial<TIssue>);
+        }}
+      />
     </div>
   );
 });
