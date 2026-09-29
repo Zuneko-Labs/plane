@@ -7,6 +7,7 @@ import json
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db import transaction
 from django.utils import timezone
 from django.db.models import Q, Value, UUIDField
 from django.db.models.functions import Coalesce
@@ -29,6 +30,7 @@ from plane.app.permissions import ProjectLitePermission
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import Intake, IntakeIssue, Issue, Project, ProjectMember, State, StateGroup
 from plane.utils.host import base_host
+from plane.utils.state_transition import commit_state_change, plan_state_change
 from plane.utils.content_validator import validate_html_content
 from .base import BaseAPIView
 from plane.db.models.intake import SourceType
@@ -384,6 +386,19 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
                     "description_json": description_json,
                 }
 
+            # a state set through intake is gated like any other state change
+            state_change = plan_state_change(
+                project_id,
+                issue,
+                issue_data,
+                request.user,
+                state_key="state",
+                alias_key="state_id",
+                assignee_key="assignees",
+            )
+            if state_change.error:
+                return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
             issue_serializer = IssueSerializer(issue, data=issue_data, partial=True)
 
             if not issue_serializer.is_valid():
@@ -414,7 +429,9 @@ class IntakeIssueDetailAPIEndpoint(BaseAPIView):
                 epoch=int(timezone.now().timestamp()),
                 intake=str(intake_issue.id),
             )
-            issue_serializer.save()
+            with transaction.atomic():
+                issue_serializer.save()
+                commit_state_change(state_change, issue, request.user)
 
         # Save intake issue (state transition happens in serializer's update method)
         if intake_serializer:

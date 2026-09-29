@@ -7,7 +7,7 @@
 import type { FC } from "react";
 import { useEffect, useRef } from "react";
 import { observer } from "mobx-react";
-import type { UseFormRegister, UseFormSetFocus } from "react-hook-form";
+import type { Control, UseFormRegister, UseFormSetFocus } from "react-hook-form";
 // plane constants
 // plane helpers
 import { useOutsideClickDetector } from "@plane/hooks";
@@ -35,13 +35,14 @@ export type TQuickAddIssueFormRoot = {
   hasError?: boolean;
   setFocus: UseFormSetFocus<TIssue>;
   register: UseFormRegister<TIssue>;
+  control: Control<TIssue>;
   onSubmit: () => void;
   onClose: () => void;
   isEpic: boolean;
 };
 
 export const QuickAddIssueFormRoot = observer(function QuickAddIssueFormRoot(props: TQuickAddIssueFormRoot) {
-  const { isOpen, layout, projectId, hasError = false, setFocus, register, onSubmit, onClose, isEpic } = props;
+  const { isOpen, layout, projectId, hasError = false, setFocus, register, control, onSubmit, onClose, isEpic } = props;
   // store hooks
   const { getProjectById } = useProject();
   // derived values
@@ -77,6 +78,7 @@ export const QuickAddIssueFormRoot = observer(function QuickAddIssueFormRoot(pro
       projectDetail={projectDetail}
       hasError={hasError}
       register={register}
+      control={control}
       onSubmit={onSubmit}
       isEpic={isEpic}
     />

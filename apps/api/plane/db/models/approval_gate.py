@@ -31,21 +31,30 @@ class ApprovalGateConfig(ProjectBaseModel):
     is_enabled = models.BooleanField(default=True)
     pending_approval_state = models.OneToOneField(
         "db.State",
-        on_delete=models.CASCADE,
+        # SET_NULL, not CASCADE: deleting one mapped state must not silently
+        # delete the whole config (and with it the gate) - state deletion of
+        # a mapped state is refused in the state views anyway.
+        on_delete=models.SET_NULL,
         related_name="+",
         null=True,
         blank=True,
     )
     approved_state = models.OneToOneField(
         "db.State",
-        on_delete=models.CASCADE,
+        # SET_NULL, not CASCADE: deleting one mapped state must not silently
+        # delete the whole config (and with it the gate) - state deletion of
+        # a mapped state is refused in the state views anyway.
+        on_delete=models.SET_NULL,
         related_name="+",
         null=True,
         blank=True,
     )
     sent_back_state = models.OneToOneField(
         "db.State",
-        on_delete=models.CASCADE,
+        # SET_NULL, not CASCADE: deleting one mapped state must not silently
+        # delete the whole config (and with it the gate) - state deletion of
+        # a mapped state is refused in the state views anyway.
+        on_delete=models.SET_NULL,
         related_name="+",
         null=True,
         blank=True,

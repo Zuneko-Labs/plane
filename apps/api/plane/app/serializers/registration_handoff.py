@@ -4,7 +4,8 @@
 
 from rest_framework import serializers
 
-from plane.db.models import RegistrationHandoffConfig, State, User
+from plane.db.models import ProjectMember, RegistrationHandoffConfig, State, User
+from plane.utils.permissions.base import ROLE
 
 from .base import BaseSerializer
 
@@ -25,3 +26,25 @@ class RegistrationHandoffConfigSerializer(BaseSerializer):
         if project_id and str(state.project_id) != str(project_id):
             raise serializers.ValidationError("Trigger state must belong to this project.")
         return state
+
+    def validate_eligible_agent_ids(self, users):
+        # only active Members/Admins can be assigned a work item - a guest or
+        # outsider named here would be emailed but never actually assigned
+        project_id = self.context.get("project_id")
+        if not project_id or not users:
+            return users
+        member_ids = {
+            str(uid)
+            for uid in ProjectMember.objects.filter(
+                project_id=project_id,
+                is_active=True,
+                role__gte=ROLE.MEMBER.value,
+                member_id__in=[user.id for user in users],
+            ).values_list("member_id", flat=True)
+        }
+        invalid = [user.display_name or user.email for user in users if str(user.id) not in member_ids]
+        if invalid:
+            raise serializers.ValidationError(
+                f"Registrars must be active members of this project: {', '.join(invalid)}."
+            )
+        return users

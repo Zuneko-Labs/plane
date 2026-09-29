@@ -8,7 +8,8 @@ import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { observer } from "mobx-react";
 import { CheckCircle2 } from "lucide-react";
-import { ISSUE_PRIORITIES } from "@plane/constants";
+import { EUserPermissions, EUserPermissionsLevel, ISSUE_PRIORITIES } from "@plane/constants";
+import { setToast, TOAST_TYPE } from "@plane/propel/toast";
 import { DueDatePropertyIcon, PriorityIcon } from "@plane/propel/icons";
 import { Tooltip } from "@plane/propel/tooltip";
 import { Avatar, AvatarGroup, Button } from "@plane/ui";
@@ -20,6 +21,7 @@ import { useLabel } from "@/hooks/store/use-label";
 import { useMember } from "@/hooks/store/use-member";
 import { useModule } from "@/hooks/store/use-module";
 import { useProjectState } from "@/hooks/store/use-project-state";
+import { useUserPermissions } from "@/hooks/store/user";
 
 interface IApprovalQueueTableProps {
   workspaceSlug: string;
@@ -35,13 +37,14 @@ interface IApprovalQueueRowProps {
   issue: TIssue;
   itemLink: string;
   isApproving: boolean;
+  canApprove: boolean;
   canSendBack: boolean;
   onApprove: () => void;
   onSendBack: () => void;
 }
 
 const ApprovalQueueRow = observer(
-  ({ issue, itemLink, isApproving, canSendBack, onApprove, onSendBack }: IApprovalQueueRowProps) => {
+  ({ issue, itemLink, isApproving, canApprove, canSendBack, onApprove, onSendBack }: IApprovalQueueRowProps) => {
     const { getUserDetails } = useMember();
     const { getModuleById } = useModule();
     const { getLabelById } = useLabel();
@@ -146,14 +149,21 @@ const ApprovalQueueRow = observer(
         </td>
         <td className="h-11 min-w-36 border-b-[0.5px] border-subtle px-4 text-13">
           <div className="flex items-center justify-end gap-2">
-            {canSendBack && (
-              <Button size="sm" variant="neutral-primary" onClick={onSendBack}>
-                Send back
-              </Button>
+            {/* only a project approver can sign off (the server enforces it too) */}
+            {canApprove ? (
+              <>
+                {canSendBack && (
+                  <Button size="sm" variant="neutral-primary" onClick={onSendBack}>
+                    Send back
+                  </Button>
+                )}
+                <Button size="sm" variant="primary" loading={isApproving} onClick={onApprove}>
+                  Approve
+                </Button>
+              </>
+            ) : (
+              <span className="text-13 text-tertiary">Awaiting approver</span>
             )}
-            <Button size="sm" variant="primary" loading={isApproving} onClick={onApprove}>
-              Approve
-            </Button>
           </div>
         </td>
       </tr>
@@ -166,6 +176,13 @@ export const ApprovalQueueTable = observer(
     const [issues, setIssues] = useState<TIssue[]>([]);
     const [selectedIssue, setSelectedIssue] = useState<TIssue | null>(null);
     const [approvingId, setApprovingId] = useState<string | null>(null);
+    const { allowPermissions } = useUserPermissions();
+    const isApprover = allowPermissions(
+      [EUserPermissions.ADMIN],
+      EUserPermissionsLevel.PROJECT,
+      workspaceSlug,
+      projectId
+    );
 
     const { data, isLoading } = useSWR(
       workspaceSlug && projectId ? `PENDING_APPROVAL_ISSUES_${workspaceSlug}_${projectId}_${pendingStateId}` : null,
@@ -186,8 +203,12 @@ export const ApprovalQueueTable = observer(
       try {
         await issueService.patchIssue(workspaceSlug, projectId, issue.id, { state_id: approvedStateId });
         setIssues((prev) => prev.filter((i) => i.id !== issue.id));
-      } catch (error) {
-        console.error("Failed to approve:", error);
+      } catch (error: any) {
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: "Couldn't approve",
+          message: error?.error ?? "The work item could not be approved. Please try again.",
+        });
       } finally {
         setApprovingId(null);
       }
@@ -261,6 +282,7 @@ export const ApprovalQueueTable = observer(
                   issue={issue}
                   itemLink={`/${workspaceSlug}/projects/${projectId}/issues/${issue.id}`}
                   isApproving={approvingId === issue.id}
+                  canApprove={isApprover}
                   canSendBack={!!sentBackStateId}
                   onApprove={() => handleApprove(issue)}
                   onSendBack={() => setSelectedIssue(issue)}

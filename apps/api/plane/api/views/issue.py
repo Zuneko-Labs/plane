@@ -66,7 +66,6 @@ from plane.app.permissions import (
 )
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import (
-    ApprovalRecord,
     Issue,
     IssueActivity,
     FileAsset,
@@ -89,14 +88,12 @@ from plane.utils.order_queryset import (
     ISSUE_ORDER_BY_ALLOWLIST,
     sanitize_order_by,
 )
-from plane.bgtasks.notification_task import notify_pending_approval
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
-from plane.utils.approval import apply_approval_gate, is_send_back_transition, resolve_gate_state_ids
+from plane.utils.state_transition import commit_state_change, plan_state_change
 from plane.utils.host import base_host
 from plane.utils.issue_relation_mapper import get_actual_relation
 from plane.utils.naming_rules import validate_work_item_name
-from plane.utils.registration_handoff import apply_registration_handoff
 from plane.bgtasks.event_outbox import (
     emit_delete_event,
     emit_event,
@@ -466,6 +463,13 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         if naming_error:
             return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
 
+        # creating straight into a state goes through the same gate as a move
+        state_change = plan_state_change(
+            project_id, None, request.data, request.user, state_key="state", alias_key="state_id", assignee_key="assignees"
+        )
+        if state_change.error:
+            return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueSerializer(
             data=request.data,
             context={
@@ -506,6 +510,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                 issue = Issue.objects.filter(
                     workspace__slug=slug, project_id=project_id, pk=serializer.data["id"]
                 ).first()
+                commit_state_change(state_change, issue, request.user)
                 issue.created_at = request.data.get("created_at", timezone.now())
                 issue.created_by_id = request.data.get("created_by", request.user.id)
                 issue.save(update_fields=["created_at", "created_by"])
@@ -728,6 +733,19 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 # changes and dispatch the issue activity
                 current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
 
+                # an upsert that moves the work item is a state change like any other
+                state_change = plan_state_change(
+                    project_id,
+                    issue,
+                    request.data,
+                    request.user,
+                    state_key="state",
+                    alias_key="state_id",
+                    assignee_key="assignees",
+                )
+                if state_change.error:
+                    return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
                 # Get the requested data, encode it as django object and pass it
                 # to serializer to validation
                 requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
@@ -745,6 +763,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                     # the update issue activity worker event.
                     with transaction.atomic():
                         serializer.save()
+                        commit_state_change(state_change, issue, request.user)
                         issue_activity.delay(
                             type="issue.activity.updated",
                             requested_data=requested_data,
@@ -791,6 +810,18 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             except Issue.DoesNotExist:
                 # If the issue does not exist, a new record needs to be created
                 # for the requested data.
+                state_change = plan_state_change(
+                    project_id,
+                    None,
+                    request.data,
+                    request.user,
+                    state_key="state",
+                    alias_key="state_id",
+                    assignee_key="assignees",
+                )
+                if state_change.error:
+                    return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
                 # Serialize the data with the context of the project and
                 # workspace
                 serializer = IssueSerializer(
@@ -813,6 +844,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                             project_id=project_id,
                             pk=serializer.data["id"],
                         ).first()
+                        commit_state_change(state_change, issue, request.user)
 
                         # If any of the created_at or created_by is present, update
                         # the issue with the provided data, else return with the
@@ -897,50 +929,13 @@ class IssueDetailAPIEndpoint(BaseAPIView):
         project = Project.objects.get(pk=project_id)
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
 
-        # Moving into the configured registration state requires naming an
-        # eligible agent — checked (and, on success, merged into
-        # assignees) before the requested_data snapshot below, so the
-        # existing assignee-notification pipeline picks the agent up too.
+        # Approval gate + registration handoff (see plane.utils.state_transition).
         # This serializer's field is "state" (FK id), not "state_id".
-        handoff_error = apply_registration_handoff(
-            project_id,
-            issue,
-            request.data.get("state"),
-            request.data,
-            agent_key="registration_agent_id",
-            assignee_key="assignees",
+        state_change = plan_state_change(
+            project_id, issue, request.data, request.user, state_key="state", alias_key="state_id", assignee_key="assignees"
         )
-        if handoff_error:
-            return Response({"error": handoff_error}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Only a project approver may move a work item into the configured
-        # Approved state, and only an approver bouncing one back out of
-        # Pending Approval counts as a Sent Back (which requires a comment).
-        # This serializer's field is "state" (FK id), not "state_id".
-        requested_state_id = request.data.get("state")
-        original_state_id = str(issue.state_id)
-        gate_pending_id, gate_approved_id, gate_sent_back_id = resolve_gate_state_ids(project_id)
-        gate_redirect_id, gate_error = apply_approval_gate(
-            project_id, issue, requested_state_id, request.data, request.user
-        )
-        if gate_error:
-            return Response({"error": gate_error}, status=status.HTTP_400_BAD_REQUEST)
-        if gate_redirect_id:
-            request.data["state"] = gate_redirect_id
-            requested_state_id = gate_redirect_id
-
-        # Entering Pending Approval notifies the project's approvers.
-        if (
-            gate_pending_id
-            and requested_state_id
-            and str(requested_state_id) == gate_pending_id
-            and str(requested_state_id) != original_state_id
-        ):
-            notify_pending_approval.delay(
-                issue_id=str(issue.id),
-                project_id=str(project_id),
-                actor_id=str(request.user.id),
-            )
+        if state_change.error:
+            return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
 
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
 
@@ -980,47 +975,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
 
             with transaction.atomic():
                 serializer.save()
-
-                # Sign-off register: written alongside the existing
-                # IssueActivity trail whenever a work item is Approved or
-                # Sent Back. The mandatory Sent Back comment is created here
-                # too, in the same transaction as the state change, so a
-                # failed save never leaves an orphan comment.
-                if requested_state_id and str(requested_state_id) != original_state_id:
-                    # Only an approver's rejection out of Pending Approval is
-                    # a Sent Back — a normal move into that stage carries no
-                    # comment and is not a sign-off (see
-                    # plane.utils.approval.is_send_back_transition).
-                    comment_html = request.data.pop("approval_comment_html", None)
-                    if (
-                        is_send_back_transition(
-                            original_state_id, requested_state_id, gate_pending_id, gate_sent_back_id
-                        )
-                        and comment_html
-                    ):
-                        IssueComment.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            comment_html=comment_html,
-                        )
-                        ApprovalRecord.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            decision=ApprovalRecord.Decision.SENT_BACK,
-                            comment=comment_html,
-                        )
-                    elif gate_approved_id and str(requested_state_id) == gate_approved_id:
-                        ApprovalRecord.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            decision=ApprovalRecord.Decision.APPROVED,
-                        )
+                commit_state_change(state_change, issue, request.user)
 
                 issue_activity.delay(
                     type="issue.activity.updated",

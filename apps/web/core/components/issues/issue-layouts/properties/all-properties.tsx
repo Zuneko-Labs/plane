@@ -8,7 +8,7 @@
    <button>; using a real <button> here would nest button-in-button, which is invalid HTML */
 
 import type { SyntheticEvent } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { xor } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
@@ -17,7 +17,6 @@ import { Paperclip } from "lucide-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
 import { LinkIcon, StartDatePropertyIcon, ViewsIcon, DueDatePropertyIcon } from "@plane/propel/icons";
-import { setToast } from "@plane/propel/toast";
 import { Tooltip } from "@plane/propel/tooltip";
 import type { TIssue, IIssueDisplayProperties, TIssuePriorities } from "@plane/types";
 // ui
@@ -29,8 +28,6 @@ import {
   shouldHighlightIssueDueDate,
 } from "@plane/utils";
 // components
-import { ApprovalSentBackModal } from "@/components/issues/approval-sent-back-modal";
-import { RegistrationAgentModal } from "@/components/issues/registration-agent-modal";
 import { CycleDropdown } from "@/components/dropdowns/cycle";
 import { DateDropdown } from "@/components/dropdowns/date";
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
@@ -46,10 +43,9 @@ import { useLabel } from "@/hooks/store/use-label";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
 import { useAppRouter } from "@/hooks/use-app-router";
-import { useApprovalGateConfig, SENT_FOR_APPROVAL_TOAST } from "@/hooks/use-approval-gate-config";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
+import { useWorkItemStateTransition } from "@/hooks/use-work-item-state-transition";
 // plane web components
 import { WorkItemLayoutAdditionalProperties } from "@/plane-web/components/issues/issue-layouts/additional-properties";
 // local components
@@ -94,16 +90,14 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
   const router = useAppRouter();
   const { workspaceSlug, projectId } = useParams();
   const workspaceSlugStr = workspaceSlug?.toString();
-  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(
-    workspaceSlugStr,
-    issue.project_id ?? undefined
-  );
-  const { isSentBackTransition, isSendForApprovalTransition } = useApprovalGateConfig(
-    workspaceSlugStr,
-    issue.project_id ?? undefined
-  );
-  const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
-  const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
+  // approval gate + registrar prompt + sent-back comment, shared by every
+  // state-change surface
+  const { changeState, stateTransitionModals } = useWorkItemStateTransition({
+    workspaceSlug: workspaceSlugStr,
+    projectId: issue.project_id,
+    workItem: issue,
+    onUpdate: async (data) => updateIssue?.(issue.project_id, issue.id, data),
+  });
 
   // derived values
   const stateDetails = getStateById(issue.state_id);
@@ -133,19 +127,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
 
   const handleState = async (stateId: string) => {
     if (!updateIssue) return;
-    // Only the first handoff needs an agent; a work item that already has
-    // one keeps it on re-entry.
-    if (isGatedState(stateId) && !issue.has_registration_handoff) {
-      setPendingRegistrationStateId(stateId);
-      return;
-    }
-    if (isSentBackTransition(issue.state_id, stateId)) {
-      setPendingSentBackStateId(stateId);
-      return;
-    }
-    const sendsForApproval = isSendForApprovalTransition(issue.state_id, stateId);
-    await updateIssue(issue.project_id, issue.id, { state_id: stateId });
-    if (sendsForApproval) setToast(SENT_FOR_APPROVAL_TOAST);
+    await changeState(stateId);
   };
 
   const handlePriority = async (value: TIssuePriorities) => {
@@ -592,40 +574,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         />
       </WithDisplayPropertiesHOC>
 
-      <RegistrationAgentModal
-        isOpen={!!pendingRegistrationStateId}
-        handleClose={() => setPendingRegistrationStateId(null)}
-        workspaceSlug={workspaceSlugStr ?? ""}
-        projectId={issue.project_id ?? ""}
-        eligibleAgentIds={eligibleAgentIds}
-        onSubmit={async (agentId) => {
-          if (!updateIssue || !pendingRegistrationStateId) return;
-          await updateIssue(issue.project_id, issue.id, {
-            state_id: pendingRegistrationStateId,
-            // Not a TIssue field — a one-shot instruction the backend reads
-            // off the raw request body (see plane.utils.registration_handoff).
-            registration_agent_id: agentId,
-            // The PATCH returns 204 with no body, and the store only applies
-            // the keys we send — so mirror the record the server just wrote,
-            // otherwise the next state change re-prompts for an agent.
-            has_registration_handoff: true,
-          } as Partial<TIssue>);
-        }}
-      />
-
-      <ApprovalSentBackModal
-        isOpen={!!pendingSentBackStateId}
-        handleClose={() => setPendingSentBackStateId(null)}
-        onSubmit={async (commentHtml) => {
-          if (!updateIssue || !pendingSentBackStateId) return;
-          await updateIssue(issue.project_id, issue.id, {
-            state_id: pendingSentBackStateId,
-            // Not a TIssue field — a one-shot instruction the backend reads
-            // off the raw request body (see plane.utils.approval).
-            approval_comment_html: commentHtml,
-          } as Partial<TIssue>);
-        }}
-      />
+      {stateTransitionModals}
     </div>
   );
 });

@@ -3,9 +3,11 @@
 # See the LICENSE file for details.
 
 """
-Handover approval gate: only a project Admin (approver) may move a work
-item into the configured Approved or Sent Back state, and Sent Back always
-requires a comment — enforced server-side, before anything is written.
+Handover approval gate: every work item passes through Pending Approval,
+and only a project Admin (approver) can move one past it, only from it - on
+every entry point (app/external API create, update, upsert). Sent Back by
+an approver requires a comment. Enforced server-side, before anything is
+written.
 """
 
 from unittest.mock import patch
@@ -19,12 +21,24 @@ from plane.db.models import (
     ApprovalRecord,
     Issue,
     IssueComment,
+    Module,
     Project,
     ProjectMember,
     State,
     User,
     WorkspaceMember,
 )
+
+
+def make_state(**kwargs):
+    # State.save() overwrites `sequence` on insert (last + 15000) - pin it so
+    # the workflow order these tests rely on is explicit
+    sequence = kwargs.pop("sequence", None)
+    state = State.objects.create(**kwargs)
+    if sequence is not None:
+        State.objects.filter(pk=state.pk).update(sequence=sequence)
+        state.sequence = sequence
+    return state
 
 
 @pytest.fixture
@@ -39,22 +53,30 @@ def project(db, workspace, create_user):
 
 @pytest.fixture
 def handover_state(db, workspace, project):
-    return State.objects.create(name="Handover", workspace=workspace, project=project, group="started", default=True)
+    return make_state(
+        name="Handover", workspace=workspace, project=project, group="started", default=True, sequence=20000
+    )
 
 
 @pytest.fixture
 def pending_approval_state(db, workspace, project):
-    return State.objects.create(name="Pending Approval", workspace=workspace, project=project, group="started")
+    return make_state(
+        name="Pending Approval", workspace=workspace, project=project, group="started", sequence=40000
+    )
 
 
 @pytest.fixture
 def approved_state(db, workspace, project):
-    return State.objects.create(name="Approved", workspace=workspace, project=project, group="completed")
+    return make_state(
+        name="Approved", workspace=workspace, project=project, group="completed", sequence=50000
+    )
 
 
 @pytest.fixture
 def sent_back_state(db, workspace, project):
-    return State.objects.create(name="Sent Back", workspace=workspace, project=project, group="started")
+    return make_state(
+        name="Sent Back", workspace=workspace, project=project, group="started", sequence=30000
+    )
 
 
 @pytest.fixture
@@ -98,175 +120,245 @@ def issue_url(workspace_slug, project_id, pk):
     return f"/api/workspaces/{workspace_slug}/projects/{project_id}/issues/{pk}/"
 
 
+@pytest.fixture
+def module(db, workspace, project, create_user):
+    return Module.objects.create(name="Handover Module", project=project, workspace=workspace, created_by=create_user)
+
+
+@pytest.fixture
+def draft_verified_state(db, workspace, project):
+    # a stage between Pending Approval and Approved - also past the gate
+    return make_state(
+        name="Draft verified", workspace=workspace, project=project, group="started", sequence=45000
+    )
+
+
+@pytest.fixture
+def after_approved_state(db, workspace, project):
+    return make_state(
+        name="Archived Copy", workspace=workspace, project=project, group="completed", sequence=60000
+    )
+
+
+def issues_url(workspace_slug, project_id):
+    return f"/api/workspaces/{workspace_slug}/projects/{project_id}/issues/"
+
+
+def v1_issue_url(workspace_slug, project_id, pk=None):
+    base = f"/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/"
+    return f"{base}{pk}/" if pk else base
+
+
+def client_for(user):
+    # a fresh client per user: api_client / session_client share one object
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
 @pytest.mark.contract
 class TestApprovalGateOnStateTransition:
     @pytest.mark.django_db
-    def test_non_approver_reaching_approved_is_redirected_to_pending(
+    def test_member_cannot_skip_pending_approval(
+        self, workspace, project, handover_issue, approved_state, gate_config, non_approver
+    ):
+        """No silent redirect: skipping Pending Approval is refused and
+        nothing changes."""
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+        response = client_for(non_approver).patch(url, {"state_id": str(approved_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        handover_issue.refresh_from_db()
+        assert handover_issue.state_id != approved_state.id
+        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
+
+    @pytest.mark.django_db
+    def test_admin_cannot_skip_pending_approval_either(
+        self, workspace, project, handover_issue, approved_state, gate_config, create_user
+    ):
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+        response = client_for(create_user).patch(url, {"state_id": str(approved_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        handover_issue.refresh_from_db()
+        assert handover_issue.state_id != approved_state.id
+
+    @pytest.mark.django_db
+    def test_any_state_after_pending_approval_is_gated_not_just_approved(
         self,
-        api_client,
         workspace,
         project,
         handover_issue,
-        approved_state,
         pending_approval_state,
+        draft_verified_state,
         gate_config,
         non_approver,
+        create_user,
     ):
-        """A member can't decide Approved themselves — the move still
-        succeeds, it just lands in Pending Approval and notifies the
-        project's approvers instead of being rejected."""
-        api_client.force_authenticate(user=non_approver)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        with (
-            patch("plane.app.views.issue.base.issue_activity"),
-            patch("plane.app.views.issue.base.notify_pending_approval") as mock_notify,
-        ):
-            response = api_client.patch(url, {"state_id": str(approved_state.id)}, format="json")
+        # skipping straight to it - refused for everyone
+        for user in (non_approver, create_user):
+            response = client_for(user).patch(url, {"state_id": str(draft_verified_state.id)}, format="json")
+            assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
 
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        # from Pending Approval - member refused
+        Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
+        response = client_for(non_approver).patch(url, {"state_id": str(draft_verified_state.id)}, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
         handover_issue.refresh_from_db()
         assert handover_issue.state_id == pending_approval_state.id
-        mock_notify.delay.assert_called_once()
-        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db
-    def test_moving_into_the_sent_back_state_as_normal_work_is_not_gated(
-        self, api_client, workspace, project, handover_issue, sent_back_state, non_approver, gate_config
+    def test_member_cannot_approve_from_pending_approval(
+        self, workspace, project, handover_issue, pending_approval_state, approved_state, gate_config, non_approver
     ):
-        """The Sent Back state doubles as an ordinary workflow stage — the
-        default mapping puts it on "Xerox and Binding", which sits
-        mid-workflow, well before Pending Approval. A member moving a work
-        item into it is just doing the next piece of work: no redirect, no
-        comment demanded, nothing logged as a rejection."""
-        api_client.force_authenticate(user=non_approver)
-        url = issue_url(workspace.slug, project.id, handover_issue.id)
-
-        with patch("plane.app.views.issue.base.issue_activity"):
-            response = api_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
-
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_back_state.id
-        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
-        assert not IssueComment.objects.filter(issue=handover_issue).exists()
-
-    @pytest.mark.django_db
-    def test_approver_moving_into_sent_back_from_elsewhere_needs_no_comment(
-        self, session_client, workspace, project, handover_issue, sent_back_state, gate_config
-    ):
-        """Even for an approver, entering that stage from somewhere other
-        than Pending Approval is normal work, not a rejection."""
-        url = issue_url(workspace.slug, project.id, handover_issue.id)
-
-        with patch("plane.app.views.issue.base.issue_activity"):
-            response = session_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
-
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_back_state.id
-        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
-
-    @pytest.mark.django_db
-    def test_member_pulling_an_item_back_out_of_pending_approval_is_not_a_rejection(
-        self, api_client, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config, non_approver
-    ):
-        """Only an approver can reject. A member moving a work item out of
-        Pending Approval is just moving it backwards in the workflow — it
-        goes through, with no sign-off record written."""
         Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
-        api_client.force_authenticate(user=non_approver)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        with patch("plane.app.views.issue.base.issue_activity"):
-            response = api_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+        response = client_for(non_approver).patch(url, {"state_id": str(approved_state.id)}, format="json")
 
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
         handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_back_state.id
-        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
+        assert handover_issue.state_id == pending_approval_state.id
 
     @pytest.mark.django_db
-    def test_approver_can_reach_approved_and_register_is_written(
-        self, session_client, workspace, project, handover_issue, approved_state, gate_config
+    def test_approver_approves_from_pending_approval_and_register_is_written(
+        self, workspace, project, handover_issue, pending_approval_state, approved_state, gate_config, create_user
     ):
+        Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = session_client.patch(url, {"state_id": str(approved_state.id)}, format="json")
+            response = client_for(create_user).patch(url, {"state_id": str(approved_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
         handover_issue.refresh_from_db()
         assert handover_issue.state_id == approved_state.id
-
         record = ApprovalRecord.objects.get(issue=handover_issue)
         assert record.decision == ApprovalRecord.Decision.APPROVED
 
     @pytest.mark.django_db
-    def test_approver_sent_back_without_comment_is_refused(
-        self, session_client, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config
+    def test_moves_between_states_already_past_the_gate_are_free(
+        self, workspace, project, handover_issue, approved_state, after_approved_state, gate_config, non_approver
     ):
-        """A rejection — approver, out of Pending Approval — must say why."""
-        Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
+        Issue.objects.filter(pk=handover_issue.id).update(state=approved_state)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        response = session_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+        with patch("plane.app.views.issue.base.issue_activity"):
+            response = client_for(non_approver).patch(url, {"state_id": str(after_approved_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+
+    @pytest.mark.django_db
+    def test_state_alias_key_cannot_bypass_the_gate(
+        self, workspace, project, handover_issue, approved_state, gate_config, non_approver
+    ):
+        """The serializer also writes the model's own `state` field - sending
+        that instead of `state_id` must hit the same gate."""
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+        response = client_for(non_approver).patch(url, {"state": str(approved_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
         handover_issue.refresh_from_db()
-        assert handover_issue.state_id != sent_back_state.id
+        assert handover_issue.state_id != approved_state.id
+
+    @pytest.mark.django_db
+    def test_moving_into_the_sent_back_state_as_normal_work_is_not_gated(
+        self, workspace, project, handover_issue, sent_back_state, non_approver, gate_config
+    ):
+        """The Sent Back state doubles as an ordinary workflow stage before
+        Pending Approval - moving into it is normal work."""
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+
+        with patch("plane.app.views.issue.base.issue_activity"):
+            response = client_for(non_approver).patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
+        assert not IssueComment.objects.filter(issue=handover_issue).exists()
+
+    @pytest.mark.django_db
+    def test_member_pulling_an_item_back_out_of_pending_approval_is_allowed(
+        self,
+        workspace,
+        project,
+        handover_issue,
+        handover_state,
+        sent_back_state,
+        pending_approval_state,
+        gate_config,
+        non_approver,
+    ):
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+
+        for target in (sent_back_state, handover_state):
+            Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
+            with patch("plane.app.views.issue.base.issue_activity"):
+                response = client_for(non_approver).patch(url, {"state_id": str(target.id)}, format="json")
+            assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+            handover_issue.refresh_from_db()
+            assert handover_issue.state_id == target.id
         assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db
-    def test_approver_sent_back_with_comment_succeeds_and_writes_comment_and_register(
-        self, session_client, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config
+    def test_approver_sent_back_without_comment_is_refused(
+        self, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config, create_user
+    ):
+        Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
+
+        response = client_for(create_user).patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        handover_issue.refresh_from_db()
+        assert handover_issue.state_id == pending_approval_state.id
+
+    @pytest.mark.django_db
+    def test_approver_sent_back_with_comment_writes_comment_and_register(
+        self, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config, create_user
     ):
         Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = session_client.patch(
+            response = client_for(create_user).patch(
                 url,
                 {"state_id": str(sent_back_state.id), "approval_comment_html": "<p>please fix the totals</p>"},
                 format="json",
             )
 
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_back_state.id
-
         assert IssueComment.objects.filter(issue=handover_issue, comment_html="<p>please fix the totals</p>").exists()
-
         record = ApprovalRecord.objects.get(issue=handover_issue)
         assert record.decision == ApprovalRecord.Decision.SENT_BACK
-        assert record.comment == "<p>please fix the totals</p>"
 
     @pytest.mark.django_db
-    def test_unrelated_field_update_does_not_require_approver(
-        self, api_client, workspace, project, handover_issue, gate_config, non_approver
-    ):
-        """Only an actual transition INTO Approved/Sent Back is gated —
-        Handover and Pending Approval stay open to anyone."""
-        api_client.force_authenticate(user=non_approver)
+    def test_unrelated_field_update_is_not_gated(self, workspace, project, handover_issue, gate_config, non_approver):
         url = issue_url(workspace.slug, project.id, handover_issue.id)
-
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = api_client.patch(url, {"priority": "high"}, format="json")
-
+            response = client_for(non_approver).patch(url, {"priority": "high"}, format="json")
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
 
     @pytest.mark.django_db
-    def test_anyone_can_enter_pending_approval(
-        self, api_client, workspace, project, handover_issue, pending_approval_state, gate_config, non_approver
+    def test_anyone_can_enter_pending_approval_and_approvers_are_notified_on_commit(
+        self,
+        workspace,
+        project,
+        handover_issue,
+        pending_approval_state,
+        gate_config,
+        non_approver,
+        django_capture_on_commit_callbacks,
     ):
-        api_client.force_authenticate(user=non_approver)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
         with (
             patch("plane.app.views.issue.base.issue_activity"),
-            patch("plane.app.views.issue.base.notify_pending_approval") as mock_notify,
+            patch("plane.utils.state_transition.notify_pending_approval") as mock_notify,
+            django_capture_on_commit_callbacks(execute=True),
         ):
-            response = api_client.patch(url, {"state_id": str(pending_approval_state.id)}, format="json")
+            response = client_for(non_approver).patch(url, {"state_id": str(pending_approval_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
         handover_issue.refresh_from_db()
@@ -275,161 +367,176 @@ class TestApprovalGateOnStateTransition:
 
     @pytest.mark.django_db
     def test_states_not_named_for_the_gate_are_unrestricted_with_no_config(
-        self, api_client, workspace, project, handover_issue, non_approver
+        self, workspace, project, handover_issue, non_approver
     ):
-        """No ApprovalGateConfig row AND no state named for one of the gate
-        roles means the gate simply doesn't apply — it's a default, not a
-        blanket constraint."""
-        unrelated_completed_state = State.objects.create(
-            name="Closed", workspace=workspace, project=project, group="completed"
-        )
-        api_client.force_authenticate(user=non_approver)
+        unrelated_state = make_state(name="Filed", workspace=workspace, project=project, group="completed")
         url = issue_url(workspace.slug, project.id, handover_issue.id)
-
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = api_client.patch(url, {"state_id": str(unrelated_completed_state.id)}, format="json")
-
+            response = client_for(non_approver).patch(url, {"state_id": str(unrelated_state.id)}, format="json")
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
 
     @pytest.mark.django_db
     def test_gate_applies_by_state_name_with_no_explicit_config(
-        self, session_client, workspace, project, handover_issue, sent_back_state, pending_approval_state
+        self, workspace, project, handover_issue, sent_back_state, pending_approval_state, create_user
     ):
-        """Zero setup required: a project with states literally named
-        "Pending Approval" and "Sent Back" is gated automatically, with no
-        ApprovalGateConfig row at all — that's what makes this on by
-        default."""
         Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        response = session_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+        response = client_for(create_user).patch(url, {"state_id": str(sent_back_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
         assert "comment" in response.data.get("error", "")
 
     @pytest.mark.django_db
-    def test_gate_applies_by_real_workflow_aliases_with_no_sent_back_state(
-        self, api_client, workspace, project, handover_issue, non_approver, create_user
-    ):
-        """The client's actual department workflows use "Sent for Approval"
-        and "Handedover" (see apply_department_workflows.py), not the
-        ticket's literal names, and have no rejection step at all. The gate
-        must still apply by default on real projects like these — Approved
-        gating active, Sent Back simply absent (not an error).
-
-        Uses two separate APIClient instances rather than the api_client /
-        session_client fixtures together — those two share one underlying
-        client object (session_client just force_authenticates api_client),
-        so switching users on one silently switches the other too.
-        """
-        sent_for_approval = State.objects.create(
-            name="Sent for Approval", workspace=workspace, project=project, group="started"
+    def test_gate_applies_by_real_workflow_aliases(self, workspace, project, handover_issue, non_approver, create_user):
+        """Department workflows name the roles "Sent for Approval" /
+        "Handedover" and have no rejection step."""
+        sent_for_approval = make_state(
+            name="Sent for Approval", workspace=workspace, project=project, group="started", sequence=40000
         )
-        handedover = State.objects.create(name="Handedover", workspace=workspace, project=project, group="completed")
-
+        handedover = make_state(
+            name="Handedover", workspace=workspace, project=project, group="completed", sequence=50000
+        )
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        non_approver_client = APIClient()
-        non_approver_client.force_authenticate(user=non_approver)
+        response = client_for(non_approver).patch(url, {"state_id": str(handedover.id)}, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
 
-        # non-approver still can't decide "Handedover" themselves — redirected
-        # into "Sent for Approval" (aliases Pending Approval) instead
-        with (
-            patch("plane.app.views.issue.base.issue_activity"),
-            patch("plane.app.views.issue.base.notify_pending_approval") as mock_notify,
-        ):
-            response = non_approver_client.patch(url, {"state_id": str(handedover.id)}, format="json")
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_for_approval.id
-        mock_notify.delay.assert_called_once()
-
-        # reset directly (not through the API) so the next check is a real
-        # transition into "Sent for Approval", not a no-op on a state it's
-        # already in from the redirect above
-        Issue.objects.filter(pk=handover_issue.id).update(state=handedover)
-        handover_issue.refresh_from_db()
-
-        # non-approver can freely enter "Sent for Approval" (aliases Pending Approval)
-        with (
-            patch("plane.app.views.issue.base.issue_activity"),
-            patch("plane.app.views.issue.base.notify_pending_approval") as mock_notify,
-        ):
-            response = non_approver_client.patch(url, {"state_id": str(sent_for_approval.id)}, format="json")
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        mock_notify.delay.assert_called_once()
-
-        # approver (create_user, role=Admin per the project fixture) reaches
-        # "Handedover" with no comment required — this workflow has no Sent
-        # Back state, so nothing demands one
-        approver_client = APIClient()
-        approver_client.force_authenticate(user=create_user)
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = approver_client.patch(url, {"state_id": str(handedover.id)}, format="json")
+            response = client_for(non_approver).patch(url, {"state_id": str(sent_for_approval.id)}, format="json")
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+
+        with patch("plane.app.views.issue.base.issue_activity"):
+            response = client_for(create_user).patch(url, {"state_id": str(handedover.id)}, format="json")
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+
+
+@pytest.mark.contract
+class TestApprovalGateOnCreate:
+    @pytest.mark.django_db
+    def test_creating_past_pending_approval_is_refused_for_everyone(
+        self,
+        workspace,
+        project,
+        handover_state,
+        approved_state,
+        draft_verified_state,
+        module,
+        gate_config,
+        non_approver,
+        create_user,
+    ):
+        url = issues_url(workspace.slug, project.id)
+        for user in (non_approver, create_user):
+            for target in (approved_state, draft_verified_state):
+                response = client_for(user).post(
+                    url,
+                    {"name": "Skipper", "state_id": str(target.id), "module_ids": [str(module.id)]},
+                    format="json",
+                )
+                assert response.status_code == status.HTTP_400_BAD_REQUEST, (
+                    f"Got {response.status_code}: {response.data!r}"
+                )
+        assert not Issue.objects.filter(name="Skipper").exists()
+
+    @pytest.mark.django_db
+    def test_creating_into_pending_approval_is_allowed(
+        self, workspace, project, handover_state, pending_approval_state, module, gate_config, non_approver
+    ):
+        url = issues_url(workspace.slug, project.id)
+        with patch("plane.app.views.issue.base.issue_activity"):
+            response = client_for(non_approver).post(
+                url,
+                {"name": "Request", "state_id": str(pending_approval_state.id), "module_ids": [str(module.id)]},
+                format="json",
+            )
+        assert response.status_code == status.HTTP_201_CREATED, f"Got {response.status_code}: {response.data!r}"
+
+
+@pytest.mark.contract
+class TestApprovalGateOnExternalApi:
+    @pytest.mark.django_db
+    def test_v1_patch_cannot_skip_pending_approval(
+        self, api_key_client, workspace, project, handover_issue, approved_state, gate_config
+    ):
+        response = api_key_client.patch(
+            v1_issue_url(workspace.slug, project.id, handover_issue.id), {"state": str(approved_state.id)}, format="json"
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        handover_issue.refresh_from_db()
+        assert handover_issue.state_id != approved_state.id
+
+    @pytest.mark.django_db
+    def test_v1_create_past_pending_approval_is_refused(
+        self, api_key_client, workspace, project, handover_state, approved_state, module, gate_config
+    ):
+        response = api_key_client.post(
+            v1_issue_url(workspace.slug, project.id),
+            {"name": "Skipper", "state": str(approved_state.id), "module_ids": [str(module.id)]},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+
 
 
 @pytest.mark.contract
 class TestApprovalGateToggle:
     @pytest.mark.django_db
     def test_disabled_gate_lets_a_member_move_straight_to_approved(
-        self, api_client, workspace, project, handover_issue, approved_state, gate_config, non_approver
+        self, workspace, project, handover_issue, approved_state, gate_config, non_approver
     ):
         gate_config.is_enabled = False
         gate_config.save()
 
-        api_client.force_authenticate(user=non_approver)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
-
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = api_client.patch(url, {"state_id": str(approved_state.id)}, format="json")
+            response = client_for(non_approver).patch(url, {"state_id": str(approved_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == approved_state.id
         assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db
     def test_disabled_gate_lets_an_admin_send_back_with_no_comment(
-        self, session_client, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config
+        self, workspace, project, handover_issue, sent_back_state, pending_approval_state, gate_config, create_user
     ):
         gate_config.is_enabled = False
         gate_config.save()
-
         Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
-        url = issue_url(workspace.slug, project.id, handover_issue.id)
 
+        url = issue_url(workspace.slug, project.id, handover_issue.id)
         with patch("plane.app.views.issue.base.issue_activity"):
-            response = session_client.patch(url, {"state_id": str(sent_back_state.id)}, format="json")
+            response = client_for(create_user).patch(url, {"state_id": str(sent_back_state.id)}, format="json")
 
         assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == sent_back_state.id
         assert not IssueComment.objects.filter(issue=handover_issue).exists()
-        assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db
-    def test_re_enabling_the_gate_restores_the_redirect(
-        self, api_client, workspace, project, handover_issue, approved_state, pending_approval_state, gate_config, non_approver
+    def test_re_enabling_the_gate_restores_it(
+        self, workspace, project, handover_issue, approved_state, gate_config, non_approver
     ):
         gate_config.is_enabled = False
         gate_config.save()
         gate_config.is_enabled = True
         gate_config.save()
 
-        api_client.force_authenticate(user=non_approver)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
+        response = client_for(non_approver).patch(url, {"state_id": str(approved_state.id)}, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
 
-        with (
-            patch("plane.app.views.issue.base.issue_activity"),
-            patch("plane.app.views.issue.base.notify_pending_approval") as mock_notify,
-        ):
-            response = api_client.patch(url, {"state_id": str(approved_state.id)}, format="json")
 
-        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-        handover_issue.refresh_from_db()
-        assert handover_issue.state_id == pending_approval_state.id
-        mock_notify.delay.assert_called_once()
+@pytest.mark.contract
+class TestWorkflowStateDeletion:
+    @pytest.mark.django_db
+    def test_a_state_mapped_in_the_gate_cannot_be_deleted(
+        self, workspace, project, pending_approval_state, gate_config, create_user
+    ):
+        response = client_for(create_user).delete(
+            f"/api/workspaces/{workspace.slug}/projects/{project.id}/states/{pending_approval_state.id}/"
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        assert ApprovalGateConfig.objects.filter(
+            pk=gate_config.pk, pending_approval_state=pending_approval_state
+        ).exists()
 
 
 @pytest.mark.contract

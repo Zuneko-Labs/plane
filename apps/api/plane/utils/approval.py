@@ -3,13 +3,13 @@
 # See the LICENSE file for details.
 
 """
-Handover approval gate — the last stage of the handover flow is a sign-off,
-not a status. Only a project Admin (the accountant, in practice) may move a
-work item into the configured Approved or Sent Back state, and Sent Back
-requires a comment explaining why every time. Enforced here so every
-state-change surface (app API, external API, kanban drag, list/spreadsheet
-inline edit — they all funnel into the two view methods that call this)
-gets it for free; client-side state-picker filtering is UX only.
+Handover approval gate — Pending Approval is a hard stop in the workflow.
+Every work item has to pass through it, and only a project Admin (the
+approver, in practice the accountant) can move one past it, and only from
+it. The rule is the same for every role — Admins included — and is applied
+to every request that can set a state (app/external API create, update and
+upsert, draft conversion, intake) through plane.utils.state_transition, so
+client-side state-picker filtering is UX only. See evaluate_approval_gate.
 
 On by default, no setup required: every project gets an explicit
 ApprovalGateConfig (`is_enabled=True`, mapped over DEFAULT_STATES — see
@@ -115,59 +115,118 @@ def is_send_back_transition(original_state_id, requested_state_id, pending_id, s
     )
 
 
-def apply_approval_gate(project_id, issue, requested_state_id, mutable_request_data, actor):
-    """Returns (redirected_state_id, error).
+APPROVAL_DECISION_APPROVED = "approved"
+APPROVAL_DECISION_SENT_BACK = "sent_back"
 
-    Two separate rules, because the two sign-off states play very different
-    roles in the workflow:
+# States in these groups are never "further along" than Pending Approval:
+# triage sits outside the flow, and cancelling a work item is not a step
+# forward in it.
+_NON_FORWARD_GROUPS = {"triage", "cancelled"}
 
-    * Approved is a pure sign-off — reaching it is approver-only, from
-      wherever the work item currently sits.
-    * Sent Back doubles as an ordinary workflow stage ("Xerox and Binding"
-      by default), so only the rejection *transition* is gated: an approver
-      moving a work item out of Pending Approval back into it, which is the
-      one that must carry a comment. Everyone else moving into that state
-      is doing normal work and is left alone (see is_send_back_transition).
 
-    error is set only when the transition must be rejected outright — an
-    approver rejecting with no comment. A non-approver targeting Approved
-    is never rejected: the move is silently redirected into Pending
-    Approval instead (redirected_state_id is set, error is None) so their
-    action still succeeds — it becomes a request the approver reviews,
-    rather than a direct move into the sign-off state. Caller must
-    overwrite the state field in the request with redirected_state_id (and
-    drop approval_comment_html) before saving.
+def _past_pending_state_ids(states, pending_id, approved_id):
+    """`states` maps state id -> {"sequence", "group", ...} for one project."""
+    past_ids = {approved_id} if approved_id else set()
+    pending = states.get(pending_id) if pending_id else None
+    if pending:
+        past_ids |= {
+            state_id
+            for state_id, state in states.items()
+            if state["group"] not in _NON_FORWARD_GROUPS and state["sequence"] > pending["sequence"]
+        }
+    return past_ids
+
+
+def get_past_pending_state_ids(project_id):
+    """Ids of the project's states that only an approver may move a work item
+    into (from Pending Approval). Empty when the gate is off."""
+    pending_id, approved_id, _ = resolve_gate_state_ids(project_id)
+    if not pending_id and not approved_id:
+        return set()
+    states = {
+        str(state["id"]): state
+        for state in State.all_state_objects.filter(project_id=project_id, deleted_at__isnull=True).values("id", "sequence", "group")
+    }
+    return _past_pending_state_ids(states, pending_id, approved_id)
+
+
+def evaluate_approval_gate(project_id, original_state_id, requested_state_id, actor, comment_html=None):
+    """Decide whether moving a work item from `original_state_id` (None when
+    the work item is being created) into `requested_state_id` is allowed.
+
+    Returns (error, decision, enters_pending):
+      * error — message to reject the request with (nothing may be written).
+      * decision — APPROVAL_DECISION_APPROVED / _SENT_BACK when the move is a
+        sign-off that must be recorded, else None.
+      * enters_pending — True when the move puts the work item into Pending
+        Approval (approvers must be notified).
+
+    The rule, identical for every role and every entry point:
+      * A state "past" Pending Approval is any state ordered after it
+        (higher `sequence`), plus the configured Approved state itself.
+      * Nobody skips Pending Approval: reaching a past state is only possible
+        from Pending Approval itself (or from a state that is already past
+        it), and never on creation.
+      * Leaving Pending Approval forwards is the sign-off — approvers only.
+      * Anyone may send a work item into Pending Approval or pull it back
+        out to an earlier stage; an approver bouncing it into the Sent Back
+        state is a rejection and must carry a comment.
     """
     if not requested_state_id:
-        return None, None
+        return None, None, False
 
     requested_state_id = str(requested_state_id)
-    original_state_id = str(issue.state_id)
+    original_state_id = str(original_state_id) if original_state_id else None
     if requested_state_id == original_state_id:
-        return None, None  # not actually a transition
+        return None, None, False  # not actually a transition
 
     pending_id, approved_id, sent_back_id = resolve_gate_state_ids(project_id)
+    if not pending_id and not approved_id:
+        return None, None, False  # gate off / not configured
 
-    if approved_id and requested_state_id == approved_id:
+    states = {
+        str(state["id"]): state
+        for state in State.all_state_objects.filter(project_id=project_id, deleted_at__isnull=True).values("id", "name", "sequence", "group")
+    }
+    target = states.get(requested_state_id)
+    if target is None:
+        return None, None, False  # unknown state - the serializer rejects it
+    pending = states.get(pending_id) if pending_id else None
+    past_pending_ids = _past_pending_state_ids(states, pending_id, approved_id)
+
+    def is_past_pending(state_id):
+        return bool(state_id) and state_id in past_pending_ids
+
+    if is_past_pending(requested_state_id):
+        if is_past_pending(original_state_id):
+            return None, None, False  # already signed off - later stages are free
+        if not pending:
+            # no Pending Approval state mapped: the Approved state alone is
+            # the sign-off and stays approver-only.
+            if not is_project_approver(actor, project_id):
+                return f'Only a project approver can move a work item to "{target["name"]}".', None, False
+            return None, APPROVAL_DECISION_APPROVED, False
+        if original_state_id != pending_id:
+            return (
+                f'A work item must be sent to "{pending["name"]}" and approved before it can move to '
+                f'"{target["name"]}".',
+                None,
+                False,
+            )
         if not is_project_approver(actor, project_id):
-            if pending_id and pending_id != requested_state_id:
-                mutable_request_data.pop("approval_comment_html", None)
-                return pending_id, None
-            # No Pending Approval state configured to redirect into — fall
-            # back to a hard rejection rather than silently landing on the
-            # sign-off state the member isn't allowed to reach.
-            return None, 'Only a project approver can move a work item to "Approved".'
-        return None, None
+            return f'Only a project approver can move a work item past "{pending["name"]}".', None, False
+        return None, APPROVAL_DECISION_APPROVED, False
 
-    if is_send_back_transition(original_state_id, requested_state_id, pending_id, sent_back_id):
-        if not is_project_approver(actor, project_id):
-            # Not a rejection at all — a member is just moving the work
-            # item back into an earlier stage. Nothing to gate; drop any
-            # stray comment so it isn't mistaken for a sign-off below.
-            mutable_request_data.pop("approval_comment_html", None)
-            return None, None
-        comment_html = mutable_request_data.get("approval_comment_html")
-        if not comment_html or not comment_html.strip():
-            return None, "Sending back requires a comment explaining why."
+    if pending_id and requested_state_id == pending_id:
+        return None, None, True
 
-    return None, None
+    if is_send_back_transition(original_state_id, requested_state_id, pending_id, sent_back_id) and (
+        is_project_approver(actor, project_id)
+    ):
+        if not comment_html or not str(comment_html).strip():
+            return "Sending back requires a comment explaining why.", None, False
+        return None, APPROVAL_DECISION_SENT_BACK, False
+
+    # every other move - including a member pulling a work item back out of
+    # Pending Approval - is ordinary work.
+    return None, None, False

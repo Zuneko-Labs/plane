@@ -45,17 +45,14 @@ from plane.app.serializers import (
 from plane.bgtasks.event_outbox import emit_delete_event, emit_event, emit_model_event
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.bgtasks.issue_description_version_task import issue_description_version_task
-from plane.bgtasks.notification_task import notify_pending_approval
 from plane.bgtasks.recent_visited_task import recent_visited_task
 from plane.bgtasks.webhook_task import model_activity
 from plane.db.models import (
-    ApprovalRecord,
     CycleIssue,
     FileAsset,
     IntakeIssue,
     Issue,
     IssueAssignee,
-    IssueComment,
     IssueLabel,
     IssueLink,
     IssueReaction,
@@ -79,10 +76,9 @@ from plane.utils.grouper import (
 )
 from plane.utils.host import base_host
 from plane.utils.issue_filters import issue_filters
-from plane.utils.approval import apply_approval_gate, is_send_back_transition, resolve_gate_state_ids
+from plane.utils.state_transition import commit_state_change, plan_state_change
 from plane.utils.naming_rules import validate_work_item_name
 from plane.utils.order_queryset import order_issue_queryset
-from plane.utils.registration_handoff import apply_registration_handoff
 from plane.utils.paginator import GroupedOffsetPaginator, SubGroupedOffsetPaginator
 from plane.utils.recurrence import add_interval, derive_days_of_month, next_month_day
 from plane.utils.timezone_converter import user_timezone_converter
@@ -471,6 +467,13 @@ class IssueViewSet(BaseViewSet):
         if naming_error:
             return Response({"error": naming_error}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Creating straight into a state is a state change too: the approval
+        # gate (no creating past Pending Approval) and the registration
+        # handoff (registrar required) apply exactly as on update.
+        state_change = plan_state_change(project_id, None, request.data, request.user)
+        if state_change.error:
+            return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueCreateSerializer(
             data=request.data,
             context={
@@ -483,6 +486,7 @@ class IssueViewSet(BaseViewSet):
         if serializer.is_valid():
             with transaction.atomic():
                 serializer.save()
+                commit_state_change(state_change, serializer.instance, request.user)
 
                 # If a recurrence rule was supplied, persist it against this first
                 # occurrence. A daily Celery Beat task creates the rest.
@@ -820,48 +824,13 @@ class IssueViewSet(BaseViewSet):
 
         current_instance = json.dumps(IssueDetailSerializer(issue).data, cls=DjangoJSONEncoder)
 
-        # Moving into the configured registration state requires naming an
-        # eligible agent — checked (and, on success, merged into
-        # assignee_ids) before the requested_data snapshot below, so the
-        # existing assignee-notification pipeline picks the agent up too.
-        handoff_error = apply_registration_handoff(
-            project_id,
-            issue,
-            request.data.get("state_id"),
-            request.data,
-            agent_key="registration_agent_id",
-            assignee_key="assignee_ids",
-        )
-        if handoff_error:
-            return Response({"error": handoff_error}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Only a project approver may move a work item into the configured
-        # Approved state, and only an approver bouncing one back out of
-        # Pending Approval counts as a Sent Back (which requires a comment).
-        requested_state_id = request.data.get("state_id")
-        original_state_id = str(issue.state_id)
-        gate_pending_id, gate_approved_id, gate_sent_back_id = resolve_gate_state_ids(project_id)
-        gate_redirect_id, gate_error = apply_approval_gate(
-            project_id, issue, requested_state_id, request.data, request.user
-        )
-        if gate_error:
-            return Response({"error": gate_error}, status=status.HTTP_400_BAD_REQUEST)
-        if gate_redirect_id:
-            request.data["state_id"] = gate_redirect_id
-            requested_state_id = gate_redirect_id
-
-        # Entering Pending Approval notifies the project's approvers.
-        if (
-            gate_pending_id
-            and requested_state_id
-            and str(requested_state_id) == gate_pending_id
-            and str(requested_state_id) != original_state_id
-        ):
-            notify_pending_approval.delay(
-                issue_id=str(issue.id),
-                project_id=str(project_id),
-                actor_id=str(request.user.id),
-            )
+        # Approval gate + registration handoff (see plane.utils.state_transition):
+        # validated here, before the requested_data snapshot below, so the
+        # registrar merged into assignee_ids reaches the assignee-notification
+        # pipeline too. Nothing is written until the save below.
+        state_change = plan_state_change(project_id, issue, request.data, request.user)
+        if state_change.error:
+            return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
 
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
 
@@ -877,46 +846,9 @@ class IssueViewSet(BaseViewSet):
             with transaction.atomic():
                 serializer.save()
 
-                # Sign-off register: written alongside the existing
-                # IssueActivity trail whenever a work item is Approved or
-                # Sent Back. The mandatory Sent Back comment is created here
-                # too, in the same transaction as the state change, so a
-                # failed save never leaves an orphan comment.
-                if requested_state_id and str(requested_state_id) != original_state_id:
-                    # Only an approver's rejection out of Pending Approval is
-                    # a Sent Back — a normal move into that stage carries no
-                    # comment and is not a sign-off (see
-                    # plane.utils.approval.is_send_back_transition).
-                    comment_html = request.data.pop("approval_comment_html", None)
-                    if (
-                        is_send_back_transition(
-                            original_state_id, requested_state_id, gate_pending_id, gate_sent_back_id
-                        )
-                        and comment_html
-                    ):
-                        IssueComment.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            comment_html=comment_html,
-                        )
-                        ApprovalRecord.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            decision=ApprovalRecord.Decision.SENT_BACK,
-                            comment=comment_html,
-                        )
-                    elif gate_approved_id and str(requested_state_id) == gate_approved_id:
-                        ApprovalRecord.objects.create(
-                            issue=issue,
-                            project_id=project_id,
-                            workspace_id=issue.workspace_id,
-                            actor=request.user,
-                            decision=ApprovalRecord.Decision.APPROVED,
-                        )
+                # Sign-off register / registrar record / notifications, in
+                # the same transaction as the state change.
+                commit_state_change(state_change, issue, request.user)
 
                 # Check if the update is a migration description update
                 is_migration_description_update = skip_activity and is_description_update

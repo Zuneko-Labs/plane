@@ -17,6 +17,7 @@ from django.utils import timezone
 # Module imports
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.db.models import Issue, Project, RegistrationHandoffConfig, State
+from plane.utils.approval import get_past_pending_state_ids, resolve_gate_state_ids
 from plane.utils.exception_logger import log_exception
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,11 @@ def archive_old_issues():
                 | Q(issue_intake__status=2)
                 | Q(issue_intake__isnull=True)
             )
+            # a work item waiting in Pending Approval is not done - it must
+            # stay in the approvers' queue until they act on it
+            pending_id, _, _ = resolve_gate_state_ids(project_id)
+            if pending_id:
+                issues = issues.exclude(state_id=pending_id)
 
             # Check if Issues
             if issues:
@@ -116,13 +122,28 @@ def close_old_issues():
                 | Q(issue_intake__status=2)
                 | Q(issue_intake__isnull=True)
             )
+            # never auto-close a work item out of the approvers' queue
+            pending_id, _, _ = resolve_gate_state_ids(project_id)
+            if pending_id:
+                issues = issues.exclude(state_id=pending_id)
 
             # Check if Issues
             if issues:
                 if project.default_state is None:
-                    close_state = State.objects.filter(group="cancelled").first()
+                    close_state = State.objects.filter(project_id=project_id, group="cancelled").first()
                 else:
                     close_state = project.default_state
+
+                # The automation has no approver behind it, so it may never
+                # move work items past Pending Approval.
+                if close_state and str(close_state.id) in get_past_pending_state_ids(project_id):
+                    logger.warning(
+                        "Skipping close_old_issues for project %s: its close state %s is past Pending "
+                        "Approval, which only an approver may move work items into.",
+                        project.id,
+                        close_state.id,
+                    )
+                    continue
 
                 # This is a system task with no request/actor to name a
                 # registration agent, so it cannot legally move issues into

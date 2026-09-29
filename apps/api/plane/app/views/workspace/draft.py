@@ -6,6 +6,7 @@
 import json
 
 # Django imports
+from django.db import transaction
 from django.utils import timezone
 from django.core import serializers
 from django.core.serializers.json import DjangoJSONEncoder
@@ -41,6 +42,7 @@ from .. import BaseViewSet
 from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.issue_filters import issue_filters
 from plane.utils.host import base_host
+from plane.utils.state_transition import commit_state_change, plan_state_change
 
 
 class WorkspaceDraftIssueViewSet(BaseViewSet):
@@ -212,6 +214,12 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # converting a draft creates the work item in its chosen state - same
+        # approval gate / registration handoff as any other create
+        state_change = plan_state_change(draft_issue.project_id, None, request.data, request.user)
+        if state_change.error:
+            return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
+
         serializer = IssueCreateSerializer(
             data=request.data,
             context={
@@ -222,7 +230,9 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
         )
 
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                serializer.save()
+                commit_state_change(state_change, serializer.instance, request.user)
 
             issue_activity.delay(
                 type="issue.activity.created",

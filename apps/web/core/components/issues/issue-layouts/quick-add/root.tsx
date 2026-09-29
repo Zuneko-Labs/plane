@@ -9,16 +9,19 @@ import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { Repeat } from "lucide-react";
-import type { UseFormRegister } from "react-hook-form";
+import type { Control, UseFormRegister } from "react-hook-form";
 import { useForm } from "react-hook-form";
 // plane imports
 import { useTranslation } from "@plane/i18n";
 import { PlusIcon } from "@plane/propel/icons";
-import { setPromiseToast } from "@plane/propel/toast";
+import { setPromiseToast, setToast, TOAST_TYPE } from "@plane/propel/toast";
 import type { IProject, TIssue, TIssueRecurrenceFrequency, EIssueLayoutTypes } from "@plane/types";
 import { cn, createIssuePayload } from "@plane/utils";
 // components
 import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
+// hooks
+import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
 // plane web imports
 import { QuickAddIssueFormRoot } from "@/plane-web/components/issues/quick-add";
 // local imports
@@ -30,6 +33,7 @@ export type TQuickAddIssueForm = {
   projectDetail: IProject;
   hasError: boolean;
   register: UseFormRegister<TIssue>;
+  control: Control<TIssue>;
   onSubmit: () => void;
   isEpic: boolean;
 };
@@ -53,6 +57,7 @@ type TQuickAddIssueRoot = {
 
 const defaultValues: Partial<TIssue> = {
   name: "",
+  module_ids: [],
 };
 
 export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQuickAddIssueRoot) {
@@ -71,6 +76,8 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   const { t } = useTranslation();
   // router
   const { workspaceSlug, projectId } = useParams();
+  const { getTransitionError } = useApprovalGateConfig(workspaceSlug?.toString(), projectId?.toString());
+  const { isGatedState } = useRegistrationHandoffConfig(workspaceSlug?.toString(), projectId?.toString());
   // states
   const [isOpen, setIsOpen] = useState(isQuickAddOpen ?? false);
   // "" = one-time (not recurring); otherwise the chosen frequency
@@ -89,6 +96,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     handleSubmit,
     setFocus,
     register,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<TIssue>({ defaultValues });
 
@@ -122,6 +130,8 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     const payload = createIssuePayload(projectId.toString(), {
       ...prePopulatedData,
       ...formData,
+      // an empty module pick must not wipe the module pre-populated by the group (e.g. grouped by module)
+      module_ids: formData.module_ids?.length ? formData.module_ids : (prePopulatedData?.module_ids ?? []),
       // attach a recurrence rule when a frequency was picked in the quick-add.
       ...(recurringFrequency
         ? {
@@ -137,12 +147,26 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     setRecurringFrequency("");
     setRecurringTimesPerMonth(1);
 
+    // a column past Pending Approval can't take new work items (nobody may
+    // create one past it - see plane.utils.approval)
+    const transitionError = !isEpic ? getTransitionError(undefined, payload.state_id) : null;
+    if (transitionError) {
+      setToast({ type: TOAST_TYPE.ERROR, title: t("common.error.label"), message: transitionError });
+      return;
+    }
+
     // no module preloaded (e.g. not grouped/filtered by module) and no
     // inline module picker in this row - open the full create modal so the
     // user can pick a module before the work item is actually created.
+    // the registration column also needs a registrar, which only the full
+    // create modal can ask for
     const hasModule = !isEpic && Array.isArray(payload.module_ids) && payload.module_ids.length > 0;
-    if (!isEpic && !hasModule) {
-      setFallbackModalPrefillData(payload);
+    const needsRegistrar = !isEpic && !!payload.state_id && isGatedState(payload.state_id);
+    if (!isEpic && (!hasModule || needsRegistrar)) {
+      // createIssuePayload adds a client-side id/tempId for optimistic updates;
+      // passing them makes the modal treat this as an existing work item (Update mode)
+      const { id: _id, tempId: _tempId, ...prefillData } = payload;
+      setFallbackModalPrefillData(prefillData);
       handleIsOpen(false);
       return;
     }
@@ -166,7 +190,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
         },
         error: {
           title: t("common.error.label"),
-          message: (err) => err?.message || t("common.error.message"),
+          message: (err) => err?.error || err?.message || t("common.error.message"),
         },
       });
 
@@ -193,6 +217,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
             hasError={!!(errors && errors?.name && errors?.name?.message)}
             setFocus={setFocus}
             register={register}
+            control={control}
             onSubmit={handleSubmit(onSubmitHandler)}
             onClose={() => handleIsOpen(false)}
             isEpic={isEpic}

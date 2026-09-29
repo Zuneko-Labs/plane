@@ -61,6 +61,7 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
     getStateById,
     hideIcon = false,
     iconSize = "size-4",
+    isForWorkItemCreation = false,
     isInitializing = false,
     onChange,
     onClose,
@@ -87,15 +88,15 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
   const { workspaceSlug } = useParams();
   // store hooks
   const { t } = useTranslation();
-  const { isApprover, isApproverOnlyState } = useApprovalGateConfig(workspaceSlug?.toString(), projectId);
+  const { isTransitionAllowed } = useApprovalGateConfig(workspaceSlug?.toString(), projectId);
+  // states past Pending Approval that this user can't move the work item
+  // into from where it is now (or create it in) are hidden - the server
+  // refuses them regardless, see plane.utils.approval.
+  const transitionFromStateId = isForWorkItemCreation ? undefined : value;
   const statesList = stateIds
     .map((stateId) => getStateById(stateId))
     .filter((state) => !!state)
-    // Approved / Sent Back are a sign-off only the project approver may
-    // give — hidden here so non-approvers don't see a state they can't
-    // actually select (the server rejects it regardless, see
-    // plane.utils.approval).
-    .filter((state) => isApprover || !isApproverOnlyState(state?.id));
+    .filter((state) => isTransitionAllowed(transitionFromStateId, state?.id));
   const defaultState = statesList?.find((state) => state?.default);
   const stateValue = value ? value : showDefaultState ? defaultState?.id : undefined;
   // popper-js init

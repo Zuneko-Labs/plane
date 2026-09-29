@@ -102,11 +102,13 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
             message: t("sub_work_item.update.success"),
           });
           setSubIssueHelpers(parentIssueId, "issue_loader", issueId);
-        } catch (_error) {
+        } catch (error: any) {
+          // clear the row loader set above, or it spins forever
+          setSubIssueHelpers(parentIssueId, "issue_loader", issueId);
           setToast({
             type: TOAST_TYPE.ERROR,
             title: t("toast.error"),
-            message: t("sub_work_item.update.error"),
+            message: error?.error ?? t("sub_work_item.update.error"),
           });
         }
       },

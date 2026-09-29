@@ -16,7 +16,13 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 
 export type TRelationIssueOperations = {
   copyLink: (path: string) => void;
-  update: (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => Promise<void>;
+  update: (
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    data: Partial<TIssue>,
+    options?: { throwOnError?: boolean }
+  ) => Promise<void>;
   remove: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
 };
 
@@ -38,7 +44,7 @@ export const useRelationOperations = (
           message: t("entity.link_copied_to_clipboard", { entity: entityName }),
         });
       },
-      update: async (workspaceSlug, projectId, issueId, data) => {
+      update: async (workspaceSlug, projectId, issueId, data, options) => {
         try {
           await updateIssue(workspaceSlug, projectId, issueId, data);
           setToast({
@@ -46,7 +52,8 @@ export const useRelationOperations = (
             type: TOAST_TYPE.SUCCESS,
             message: t("entity.update.success", { entity: entityName }),
           });
-        } catch (_error) {
+        } catch (error) {
+          if (options?.throwOnError) throw error;
           setToast({
             title: t("toast.error"),
             type: TOAST_TYPE.ERROR,
