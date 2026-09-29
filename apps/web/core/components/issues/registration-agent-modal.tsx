@@ -55,11 +55,11 @@ export const RegistrationAgentModal = (props: Props) => {
     try {
       await onSubmit(agentId);
       onClose();
-    } catch {
+    } catch (err: any) {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Error",
-        message: "Could not name the registration agent. Please try again.",
+        message: err?.error ?? err?.detail ?? "Could not assign the registrar. Please try again.",
       });
       setIsSubmitting(false);
     }
@@ -68,21 +68,21 @@ export const RegistrationAgentModal = (props: Props) => {
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
       <div className="p-5">
-        <h5 className="text-base font-medium text-primary">Name a registration agent</h5>
+        <h5 className="text-base font-medium text-primary">Assign a registrar</h5>
         <p className="mt-2 text-13 text-tertiary">
-          A physical person will need to go to the sub-registrar's office for this. Pick who's handling it — they'll
-          be added as an assignee and notified.
+          A physical person will need to go to the sub-registrar's office for this. Pick who's handling it — they'll be
+          added as an assignee and emailed.
         </p>
         <div className="mt-4">
           <MemberDropdown
             value={agentId}
             onChange={setAgentId}
-            // an empty eligible-agents list means "not configured yet", not
-            // "nobody is eligible" — fall back to every project member
-            memberIds={eligibleAgentIds.length > 0 ? eligibleAgentIds : undefined}
+            // already narrowed to active Members/Admins (and the configured
+            // pool, if any) by useRegistrationHandoffConfig
+            memberIds={eligibleAgentIds}
             projectId={projectId}
             multiple={false}
-            placeholder="Select registration agent"
+            placeholder="Select registrar"
             buttonVariant="border-with-text"
           />
         </div>

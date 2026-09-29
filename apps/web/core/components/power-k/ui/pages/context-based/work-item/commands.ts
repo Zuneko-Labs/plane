@@ -88,13 +88,16 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
   const handleUpdateEntity = useCallback(
     async (formData: Partial<TIssue>) => {
       if (!workspaceSlug || !entityDetails || !entityDetails.project_id) return;
-      await updateEntity(workspaceSlug.toString(), entityDetails.project_id, entityDetails.id, formData).catch(() => {
-        setToast({
-          type: TOAST_TYPE.ERROR,
-          title: "Error!",
-          message: `${isEpic ? "Epic" : "Work item"} could not be updated. Please try again.`,
-        });
-      });
+      await updateEntity(workspaceSlug.toString(), entityDetails.project_id, entityDetails.id, formData).catch(
+        (error: any) => {
+          setToast({
+            type: TOAST_TYPE.ERROR,
+            title: "Error!",
+            // e.g. the approval gate's reason for refusing a state change
+            message: error?.error ?? `${isEpic ? "Epic" : "Work item"} could not be updated. Please try again.`,
+          });
+        }
+      );
     },
     [entityDetails, isEpic, updateEntity, workspaceSlug]
   );

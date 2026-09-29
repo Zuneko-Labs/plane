@@ -75,7 +75,7 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
           console.error("Error fetching the parent issue", error);
         }
       },
-      update: async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
+      update: async (workspaceSlug, projectId, issueId, data, options) => {
         if (issues?.updateIssue) {
           await issues
             .updateIssue(workspaceSlug, projectId, issueId, data)
@@ -83,7 +83,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
               fetchActivities(workspaceSlug, projectId, issueId);
               return;
             })
-            .catch((_error) => {
+            .catch((error) => {
+              if (options?.throwOnError) throw error;
               setToast({
                 title: t("toast.error"),
                 type: TOAST_TYPE.ERROR,

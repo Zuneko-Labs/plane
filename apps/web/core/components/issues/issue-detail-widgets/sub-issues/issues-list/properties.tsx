@@ -21,6 +21,7 @@ import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 // hooks
 import { WithDisplayPropertiesHOC } from "@/components/issues/issue-layouts/properties/with-display-properties-HOC";
 import { useProjectState } from "@/hooks/store/use-project-state";
+import { useWorkItemStateTransition } from "@/hooks/use-work-item-state-transition";
 
 type Props = {
   workspaceSlug: string;
@@ -43,6 +44,15 @@ export const SubIssuesListItemProperties = observer(function SubIssuesListItemPr
   const { workspaceSlug, parentIssueId, issueId, canEdit, updateSubIssue, displayProperties, issue } = props;
   const { t } = useTranslation();
   const { getStateById } = useProjectState();
+  // approval gate + registrar prompt + sent-back comment, shared by every
+  // state-change surface
+  const { changeState, stateTransitionModals } = useWorkItemStateTransition({
+    workspaceSlug,
+    projectId: issue.project_id,
+    workItem: issue,
+    onUpdate: async (data) =>
+      issue.project_id && updateSubIssue(workspaceSlug, issue.project_id, parentIssueId, issueId, data, { ...issue }),
+  });
 
   const handleEventPropagation = (e: SyntheticEvent<HTMLDivElement>) => {
     e.stopPropagation();
@@ -88,19 +98,7 @@ export const SubIssuesListItemProperties = observer(function SubIssuesListItemPr
           <StateDropdown
             value={issue.state_id}
             projectId={issue.project_id ?? undefined}
-            onChange={(val) =>
-              issue.project_id &&
-              updateSubIssue(
-                workspaceSlug,
-                issue.project_id,
-                parentIssueId,
-                issueId,
-                {
-                  state_id: val,
-                },
-                { ...issue }
-              )
-            }
+            onChange={(val) => changeState(val)}
             disabled={!canEdit}
             buttonVariant="transparent-without-text"
             buttonClassName="hover:bg-transparent px-0"
@@ -222,6 +220,7 @@ export const SubIssuesListItemProperties = observer(function SubIssuesListItemPr
           />
         </div>
       </WithDisplayPropertiesHOC>
+      {stateTransitionModals}
     </div>
   );
 });

@@ -15,7 +15,10 @@ import { RegistrationAgentModal } from "@/components/issues/registration-agent-m
 import approvalGateService from "@/services/approval-gate.service";
 import registrationHandoffService from "@/services/registration-handoff.service";
 import { ISSUE_FILTER_DEFAULT_DATA } from "@/store/issue/helpers/base-issues.store";
-import { SENT_FOR_APPROVAL_TOAST } from "./use-approval-gate-config";
+import { getApprovalTransitionError, SENT_FOR_APPROVAL_TOAST } from "./use-approval-gate-config";
+import { REGISTRATION_AGENT_REQUIRED } from "./use-registration-handoff-config";
+import { useMember } from "./store/use-member";
+import { useProjectState } from "./store/use-project-state";
 import { useIssueDetail } from "./store/use-issue-detail";
 import { useIssues } from "./store/use-issues";
 import { useIssuesActions } from "./use-issues-actions";
@@ -61,6 +64,17 @@ export const useGroupIssuesDragNDrop = (
     issue: { getIssueById },
   } = useIssueDetail();
   const { updateIssue } = useIssuesActions(storeType);
+  const { getProjectStates } = useProjectState();
+  const {
+    project: { getProjectMemberIds },
+  } = useMember();
+
+  // active Members/Admins (guests can't be assigned), narrowed to the
+  // configured pool when there is one - mirrors plane.utils.registration_handoff
+  const getEligibleAgentIds = (projectId: string, configuredIds: string[] = []) => {
+    const memberIds = getProjectMemberIds(projectId, false) ?? [];
+    return configuredIds.length > 0 ? memberIds.filter((memberId) => configuredIds.includes(memberId)) : memberIds;
+  };
   const {
     issues: { getIssueIds, addCycleToIssue, removeCycleFromIssue, changeModulesInIssue },
   } = useIssues(storeType);
@@ -128,22 +142,13 @@ export const useGroupIssuesDragNDrop = (
     }
 
     const stateId = data.state_id as string | undefined;
+    let sendsForApproval = false;
     if (stateId && workspaceSlug) {
-      const configs = await registrationHandoffService
-        .fetchConfig(workspaceSlug.toString(), projectId)
-        .catch(() => undefined);
-      const config = configs?.[0];
-      // Only the first entry into the registration state needs an agent —
-      // an item already handed off keeps the agent it was given.
-      const alreadyHandedOff = !!getIssueById(issueId)?.has_registration_handoff;
-      if (config && config.trigger_state_id === stateId && !alreadyHandedOff) {
-        setPendingRegistrationDrop({ projectId, issueId, data, eligibleAgentIds: config.eligible_agent_ids });
-        return;
-      }
-
-      const approvalConfigs = await approvalGateService
-        .fetchConfig(workspaceSlug.toString(), projectId)
-        .catch(() => undefined);
+      const [registrationConfigs, approvalConfigs] = await Promise.all([
+        registrationHandoffService.fetchConfig(workspaceSlug.toString(), projectId).catch(() => undefined),
+        approvalGateService.fetchConfig(workspaceSlug.toString(), projectId).catch(() => undefined),
+      ]);
+      const registrationConfig = registrationConfigs?.[0];
       const approvalConfig = approvalConfigs?.[0];
       const isGateOn = !!approvalConfig && (approvalConfig.is_enabled ?? true);
       const fromStateId = getIssueById(issueId)?.state_id;
@@ -154,29 +159,31 @@ export const useGroupIssuesDragNDrop = (
         projectId
       );
 
-      // Only Approved is approver-only to enter. The Sent Back state is an
-      // ordinary workflow stage ("Xerox and Binding" by default) that work
-      // items pass through going forward, so dropping onto that column is
-      // a normal move — never redirected (see plane.utils.approval).
-      if (isGateOn && !!approvalConfig.approved_state_id && stateId === approvalConfig.approved_state_id) {
-        if (!isApprover) {
-          // A member can't decide Approved themselves — their drop still
-          // succeeds, it just lands in Pending Approval and notifies the
-          // project's approvers instead (the server applies this same
-          // redirect regardless; doing it here too means the card lands in
-          // the right column immediately instead of flashing into a state
-          // it'll get corrected out of).
-          if (approvalConfig.pending_approval_state_id) {
-            data.state_id = approvalConfig.pending_approval_state_id;
-          } else {
-            setToast({
-              type: TOAST_TYPE.ERROR,
-              title: "Not allowed",
-              message: 'Only a project approver can move a work item to "Approved".',
-            });
-            return;
-          }
-        }
+      // Pending Approval is a hard stop for everyone - refuse a drop the
+      // server would refuse (see plane.utils.approval), no redirect.
+      const transitionError = getApprovalTransitionError({
+        config: approvalConfig,
+        states: getProjectStates(projectId),
+        isApprover,
+        fromStateId,
+        toStateId: stateId,
+      });
+      if (transitionError) {
+        setToast({ type: TOAST_TYPE.ERROR, title: "Can't move work item", message: transitionError });
+        return;
+      }
+
+      // Only the first entry into the registration state needs a registrar —
+      // an item already handed off keeps the one it was given.
+      const alreadyHandedOff = !!getIssueById(issueId)?.has_registration_handoff;
+      if (registrationConfig && registrationConfig.trigger_state_id === stateId && !alreadyHandedOff) {
+        setPendingRegistrationDrop({
+          projectId,
+          issueId,
+          data,
+          eligibleAgentIds: getEligibleAgentIds(projectId, registrationConfig.eligible_agent_ids),
+        });
+        return;
       }
 
       // Ask for a reason only for an actual rejection — an approver
@@ -186,30 +193,33 @@ export const useGroupIssuesDragNDrop = (
         isApprover &&
         !!approvalConfig.sent_back_state_id &&
         !!approvalConfig.pending_approval_state_id &&
-        data.state_id === approvalConfig.sent_back_state_id &&
+        stateId === approvalConfig.sent_back_state_id &&
         fromStateId === approvalConfig.pending_approval_state_id
       ) {
         setPendingSentBackDrop({ projectId, issueId, data });
         return;
       }
 
-      // Landing in Pending Approval — whether dropped there directly or
-      // redirected out of Approved above — is what submits a work item for
-      // sign-off, so say so either way.
-      if (
+      sendsForApproval =
         isGateOn &&
         !!approvalConfig.pending_approval_state_id &&
-        data.state_id === approvalConfig.pending_approval_state_id &&
-        fromStateId !== approvalConfig.pending_approval_state_id
-      ) {
-        setToast(SENT_FOR_APPROVAL_TOAST);
-      }
+        stateId === approvalConfig.pending_approval_state_id &&
+        fromStateId !== approvalConfig.pending_approval_state_id;
     }
 
     if (updateIssue) {
-      updateIssue(projectId, issueId, data).catch((err) =>
-        setToast({ ...errorToastProps, message: err?.error ?? err?.detail ?? errorToastProps.message })
-      );
+      updateIssue(projectId, issueId, data)
+        .then(() => {
+          if (sendsForApproval) setToast(SENT_FOR_APPROVAL_TOAST);
+        })
+        .catch((err) => {
+          // the registrar on record is no longer eligible - ask for a new one
+          if (err?.error_code === REGISTRATION_AGENT_REQUIRED) {
+            setPendingRegistrationDrop({ projectId, issueId, data, eligibleAgentIds: getEligibleAgentIds(projectId) });
+            return;
+          }
+          setToast({ ...errorToastProps, message: err?.error ?? err?.detail ?? errorToastProps.message });
+        });
     }
   };
 
@@ -250,9 +260,13 @@ export const useGroupIssuesDragNDrop = (
       onSubmit={async (agentId) => {
         if (!pendingRegistrationDrop || !updateIssue) return;
         const { projectId, issueId, data } = pendingRegistrationDrop;
+        const currentAssigneeIds = getIssueById(issueId)?.assignee_ids ?? [];
         await updateIssue(projectId, issueId, {
           ...data,
           registration_agent_id: agentId,
+          // the server adds the registrar on top of the assignees sent, so
+          // sending them also shows the registrar on the card right away
+          assignee_ids: Array.from(new Set([...currentAssigneeIds, agentId])),
           // The PATCH returns 204 with no body, and the store only applies
           // the keys we send — so mirror the record the server just wrote,
           // otherwise the next state change re-prompts for an agent.

@@ -4,11 +4,9 @@
  * See the LICENSE file for details.
  */
 
-import { useState } from "react";
 import { observer } from "mobx-react";
 // i18n
 import { useTranslation } from "@plane/i18n";
-import type { TIssue } from "@plane/types";
 // ui
 import {
   CycleIcon,
@@ -23,7 +21,6 @@ import {
   EstimatePropertyIcon,
   ParentPropertyIcon,
 } from "@plane/propel/icons";
-import { setToast } from "@plane/propel/toast";
 import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@plane/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
@@ -38,8 +35,7 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
-import { useApprovalGateConfig, SENT_FOR_APPROVAL_TOAST } from "@/hooks/use-approval-gate-config";
-import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
+import { useWorkItemStateTransition } from "@/hooks/use-work-item-state-transition";
 // plane web components
 // components
 import { WorkItemAdditionalSidebarProperties } from "@/plane-web/components/issues/issue-details/additional-properties";
@@ -48,8 +44,6 @@ import { DateAlert } from "@/plane-web/components/issues/issue-details/sidebar/d
 import { TransferHopInfo } from "@/plane-web/components/issues/issue-details/sidebar/transfer-hop-info";
 import { IssueWorklogProperty } from "@/plane-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
-import { ApprovalSentBackModal } from "../approval-sent-back-modal";
-import { RegistrationAgentModal } from "../registration-agent-modal";
 import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";
 import { IssueModuleSelect } from "./module-select";
@@ -75,11 +69,15 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
   } = useIssueDetail();
   const { getUserDetails } = useMember();
   const { getStateById } = useProjectState();
-  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId);
-  const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
-  const { isSentBackTransition, isSendForApprovalTransition } = useApprovalGateConfig(workspaceSlug, projectId);
-  const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
   const issue = getIssueById(issueId);
+  // approval gate + registrar prompt + sent-back comment, shared by every
+  // state-change surface
+  const { changeState, stateTransitionModals } = useWorkItemStateTransition({
+    workspaceSlug,
+    projectId,
+    workItem: issue,
+    onUpdate: (data) => issueOperations.update(workspaceSlug, projectId, issueId, data, { throwOnError: true }),
+  });
   if (!issue) return <></>;
 
   const createdByDetails = getUserDetails(issue.created_by);
@@ -103,17 +101,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
               <StateDropdown
                 value={issue?.state_id}
-                onChange={(val) => {
-                  // Only the first handoff needs an agent; a work item that
-                  // already has one keeps it on re-entry.
-                  if (val && isGatedState(val) && !issue.has_registration_handoff) setPendingRegistrationStateId(val);
-                  else if (val && isSentBackTransition(issue?.state_id, val)) setPendingSentBackStateId(val);
-                  else {
-                    const sendsForApproval = isSendForApprovalTransition(issue?.state_id, val);
-                    issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val });
-                    if (sendsForApproval) setToast(SENT_FOR_APPROVAL_TOAST);
-                  }
-                }}
+                onChange={(val) => changeState(val)}
                 projectId={projectId?.toString() ?? ""}
                 disabled={!isEditable}
                 buttonVariant="transparent-with-text"
@@ -306,40 +294,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
         </div>
       </div>
 
-      <RegistrationAgentModal
-        isOpen={!!pendingRegistrationStateId}
-        handleClose={() => setPendingRegistrationStateId(null)}
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        eligibleAgentIds={eligibleAgentIds}
-        onSubmit={async (agentId) => {
-          if (!pendingRegistrationStateId) return;
-          await issueOperations.update(workspaceSlug, projectId, issueId, {
-            state_id: pendingRegistrationStateId,
-            // Not a TIssue field — a one-shot instruction the backend reads
-            // off the raw request body (see plane.utils.registration_handoff).
-            registration_agent_id: agentId,
-            // The PATCH returns 204 with no body, and the store only applies
-            // the keys we send — so mirror the record the server just wrote,
-            // otherwise the next state change re-prompts for an agent.
-            has_registration_handoff: true,
-          } as Partial<TIssue>);
-        }}
-      />
-
-      <ApprovalSentBackModal
-        isOpen={!!pendingSentBackStateId}
-        handleClose={() => setPendingSentBackStateId(null)}
-        onSubmit={async (commentHtml) => {
-          if (!pendingSentBackStateId) return;
-          await issueOperations.update(workspaceSlug, projectId, issueId, {
-            state_id: pendingSentBackStateId,
-            // Not a TIssue field — a one-shot instruction the backend reads
-            // off the raw request body (see plane.utils.approval).
-            approval_comment_html: commentHtml,
-          } as Partial<TIssue>);
-        }}
-      />
+      {stateTransitionModals}
     </>
   );
 });

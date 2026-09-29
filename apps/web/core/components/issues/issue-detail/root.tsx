@@ -29,7 +29,15 @@ import { IssueDetailsSidebar } from "./sidebar";
 
 export type TIssueOperations = {
   fetch: (workspaceSlug: string, projectId: string, issueId: string, loader?: boolean) => Promise<void>;
-  update: (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => Promise<void>;
+  update: (
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    data: Partial<TIssue>,
+    // rethrow instead of toasting, for callers that handle the server's
+    // error themselves (e.g. useWorkItemStateTransition)
+    options?: { throwOnError?: boolean }
+  ) => Promise<void>;
   remove: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
   archive?: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
   restore?: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
@@ -91,10 +99,11 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           console.error("Error fetching the parent issue:", error);
         }
       },
-      update: async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
+      update: async (workspaceSlug, projectId, issueId, data, options) => {
         try {
           await updateIssue(workspaceSlug, projectId, issueId, data);
         } catch (error) {
+          if (options?.throwOnError) throw error;
           console.log("Error in updating issue:", error);
           setToast({
             title: t("common.error.label"),

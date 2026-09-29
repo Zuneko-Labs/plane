@@ -18,6 +18,7 @@ from plane.api.serializers import StateSerializer
 from plane.app.permissions import ProjectEntityPermission
 from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import Issue, State
+from plane.utils.state_transition import workflow_role_of_state
 from .base import BaseAPIView
 from plane.utils.openapi import (
     state_docs,
@@ -249,6 +250,16 @@ class StateDetailAPIEndpoint(BaseAPIView):
         if state.default:
             return Response(
                 {"error": "Default state cannot be deleted"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        workflow_role = workflow_role_of_state(project_id, state_id)
+        if workflow_role:
+            return Response(
+                {
+                    "error": f'This state is the project’s "{workflow_role}" step. Remap it in the '
+                    "workflow settings before deleting it."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

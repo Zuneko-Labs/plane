@@ -45,7 +45,6 @@ from plane.db.models import (
     IssueActivity,
     FileAsset,
     IssueLink,
-    IssueSubscriber,
     Project,
     ProjectMember,
     User,
@@ -489,15 +488,19 @@ class WorkspaceUserProfileStatsEndpoint(BaseAPIView):
             .count()
         )
 
+        # count the same work items the Subscribed tab lists (issue_objects excludes
+        # deleted / archived / draft / triage items)
         subscribed_issues_count = (
-            IssueSubscriber.objects.filter(
+            Issue.issue_objects.filter(
                 workspace__slug=slug,
-                subscriber_id=user_id,
+                issue_subscribers__subscriber_id=user_id,
+                issue_subscribers__deleted_at__isnull=True,
                 project__project_projectmember__member=request.user,
                 project__project_projectmember__is_active=True,
                 project__archived_at__isnull=True,
             )
             .filter(**filters)
+            .distinct()
             .count()
         )
 

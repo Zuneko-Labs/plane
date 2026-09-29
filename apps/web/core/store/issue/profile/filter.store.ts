@@ -9,7 +9,7 @@ import { action, computed, makeObservable, observable, runInAction } from "mobx"
 // base class
 import { computedFn } from "mobx-utils";
 import type { TSupportedFilterTypeForUpdate } from "@plane/constants";
-import { EIssueFilterType } from "@plane/constants";
+import { EIssueFilterType, ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@plane/constants";
 import type {
   IIssueDisplayFilterOptions,
   IIssueDisplayProperties,
@@ -19,8 +19,9 @@ import type {
   IssuePaginationOptions,
   TWorkItemFilterExpression,
   TSupportedFilterForUpdate,
+  TIssueGroupByOptions,
 } from "@plane/types";
-import { EIssuesStoreType } from "@plane/types";
+import { EIssueLayoutTypes, EIssuesStoreType } from "@plane/types";
 import { handleIssueQueryParamsByLayout } from "@plane/utils";
 import { IssueFiltersService } from "@/services/issue_filter.service";
 import type { IBaseIssueFilterStore } from "../helpers/issue-filter-helper.store";
@@ -53,6 +54,42 @@ export interface IProfileIssuesFilter extends IBaseIssueFilterStore {
     userId: string
   ) => Promise<void>;
 }
+
+/**
+ * The shared display-filter defaults (Kanban grouped by state) are project-board
+ * defaults. The profile ("Your work") pages span projects, so project-scoped
+ * groupings like "state" have no columns there and the layout renders nothing.
+ * Keep only the layouts / groupings the profile page supports.
+ */
+const sanitizeProfileDisplayFilters = (
+  displayFilters: IIssueDisplayFilterOptions,
+  savedDisplayFilters?: IIssueDisplayFilterOptions
+): IIssueDisplayFilterOptions => {
+  const source = savedDisplayFilters ?? displayFilters;
+  const layout: EIssueLayoutTypes.LIST | EIssueLayoutTypes.KANBAN =
+    source?.layout === EIssueLayoutTypes.KANBAN ? EIssueLayoutTypes.KANBAN : EIssueLayoutTypes.LIST;
+  const layoutOptions = ISSUE_DISPLAY_FILTERS_BY_PAGE.profile_issues.layoutOptions[layout];
+  const allowedGroupBy = (layoutOptions?.display_filters?.group_by ?? []) as TIssueGroupByOptions[];
+  const fallbackGroupBy: TIssueGroupByOptions = layout === EIssueLayoutTypes.KANBAN ? "state_detail.group" : null;
+
+  const groupBy = source?.group_by ?? null;
+  const safeGroupBy = allowedGroupBy.includes(groupBy) ? groupBy : fallbackGroupBy;
+  const subGroupBy = source?.sub_group_by ?? null;
+  const safeSubGroupBy =
+    layout === EIssueLayoutTypes.KANBAN &&
+    subGroupBy &&
+    subGroupBy !== safeGroupBy &&
+    allowedGroupBy.includes(subGroupBy)
+      ? subGroupBy
+      : null;
+
+  return {
+    ...displayFilters,
+    layout,
+    group_by: safeGroupBy,
+    sub_group_by: safeSubGroupBy,
+  };
+};
 
 export class ProfileIssuesFilter extends IssueFilterHelperStore implements IProfileIssuesFilter {
   // observables
@@ -141,7 +178,10 @@ export class ProfileIssuesFilter extends IssueFilterHelperStore implements IProf
     const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.PROFILE, workspaceSlug, userId, undefined);
 
     const richFilters: TWorkItemFilterExpression = _filters?.rich_filters;
-    const displayFilters: IIssueDisplayFilterOptions = this.computedDisplayFilters(_filters?.display_filters);
+    const displayFilters: IIssueDisplayFilterOptions = sanitizeProfileDisplayFilters(
+      this.computedDisplayFilters(_filters?.display_filters),
+      _filters?.display_filters
+    );
     const displayProperties: IIssueDisplayProperties = this.computedDisplayProperties(_filters?.display_properties);
     const kanbanFilters = {
       group_by: _filters?.kanban_filters?.group_by || [],
@@ -218,6 +258,14 @@ export class ProfileIssuesFilter extends IssueFilterHelperStore implements IProf
             _filters.displayFilters.group_by = "priority";
             updatedDisplayFilters.group_by = "priority";
           }
+          // never persist a layout / grouping the profile page can't render
+          const sanitizedDisplayFilters = sanitizeProfileDisplayFilters(_filters.displayFilters);
+          (["layout", "group_by", "sub_group_by"] as const).forEach((key) => {
+            if (sanitizedDisplayFilters[key] !== _filters.displayFilters[key]) {
+              _filters.displayFilters[key] = sanitizedDisplayFilters[key];
+              updatedDisplayFilters[key] = sanitizedDisplayFilters[key];
+            }
+          });
 
           runInAction(() => {
             Object.keys(updatedDisplayFilters).forEach((_key) => {

@@ -36,7 +36,9 @@ export const ApprovalSentBackModal = (props: Props) => {
     if (!comment.trim()) return;
     setIsSubmitting(true);
     try {
-      await onSubmit(`<p>${comment.trim()}</p>`);
+      // plain text typed by the user - escape it before wrapping it as HTML
+      const escaped = comment.trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      await onSubmit(`<p>${escaped}</p>`);
       onClose();
     } catch (err: any) {
       setToast({

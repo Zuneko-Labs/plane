@@ -55,6 +55,7 @@ from plane.app.views.base import BaseAPIView
 from plane.utils.timezone_converter import user_timezone_converter
 from plane.utils.global_paginator import paginate
 from plane.utils.host import base_host
+from plane.utils.state_transition import commit_state_change, plan_state_change
 from plane.db.models.intake import SourceType
 
 
@@ -397,6 +398,7 @@ class IntakeIssueViewSet(BaseViewSet):
         issue = None
         issue_current_instance = None
         issue_requested_data = None
+        state_change = None
 
         # Validate issue data if provided
         if bool(issue_data):
@@ -425,6 +427,11 @@ class IntakeIssueViewSet(BaseViewSet):
                     "description_html": issue_data.get("description_html", issue.description_html),
                     "description_json": issue_data.get("description_json", issue.description_json),
                 }
+
+            # a state set through intake is gated like any other state change
+            state_change = plan_state_change(project_id, issue, issue_data, request.user)
+            if state_change.error:
+                return Response(state_change.error_response(), status=status.HTTP_400_BAD_REQUEST)
 
             issue_current_instance = json.dumps(IssueDetailSerializer(issue).data, cls=DjangoJSONEncoder)
             issue_requested_data = json.dumps(issue_data, cls=DjangoJSONEncoder)
@@ -462,6 +469,7 @@ class IntakeIssueViewSet(BaseViewSet):
         with transaction.atomic():
             if issue_serializer:
                 issue_serializer.save()
+                commit_state_change(state_change, issue, request.user)
 
                 # Check if the update is a migration description update
                 is_migration_description_update = skip_activity and is_description_update

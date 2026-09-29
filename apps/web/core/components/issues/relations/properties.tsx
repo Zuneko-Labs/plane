@@ -14,6 +14,7 @@ import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
+import { useWorkItemStateTransition } from "@/hooks/use-work-item-state-transition";
 // types
 import type { TRelationIssueOperations } from "../issue-detail-widgets/relations/helper";
 
@@ -35,15 +36,22 @@ export const RelationIssueProperty = observer(function RelationIssueProperty(pro
   // derived value
   const issue = getIssueById(issueId);
 
+  // approval gate + registrar prompt + sent-back comment, shared by every
+  // state-change surface
+  const { changeState, stateTransitionModals } = useWorkItemStateTransition({
+    workspaceSlug,
+    projectId: issue?.project_id,
+    workItem: issue,
+    onUpdate: async (data) =>
+      issue?.project_id &&
+      issueOperations.update(workspaceSlug, issue.project_id, issueId, data, { throwOnError: true }),
+  });
+
   // if issue is not found, return empty
   if (!issue) return <></>;
 
   // handlers
-  const handleStateChange = (val: string) =>
-    issue.project_id &&
-    issueOperations.update(workspaceSlug, issue.project_id, issueId, {
-      state_id: val,
-    });
+  const handleStateChange = (val: string) => changeState(val);
 
   const handlePriorityChange = (val: TIssuePriorities) =>
     issue.project_id &&
@@ -90,6 +98,7 @@ export const RelationIssueProperty = observer(function RelationIssueProperty(pro
           buttonClassName={(issue?.assignee_ids || []).length > 0 ? "hover:bg-transparent px-0" : ""}
         />
       </div>
+      {stateTransitionModals}
     </div>
   );
 });

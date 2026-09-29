@@ -23,6 +23,7 @@ from plane.app.permissions import ROLE, allow_permission
 from plane.bgtasks.event_outbox import emit_delete_event, emit_model_event
 from plane.db.models import State, Issue
 from plane.utils.cache import invalidate_cache
+from plane.utils.state_transition import workflow_role_of_state
 
 
 class StateViewSet(BaseViewSet):
@@ -145,6 +146,16 @@ class StateViewSet(BaseViewSet):
         if state.default:
             return Response(
                 {"error": "Default state cannot be deleted"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        workflow_role = workflow_role_of_state(project_id, pk)
+        if workflow_role:
+            return Response(
+                {
+                    "error": f'This state is the project’s "{workflow_role}" step. Remap it in the '
+                    "workflow settings before deleting it."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

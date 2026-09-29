@@ -44,6 +44,9 @@ import { useProjectState } from "@/hooks/store/use-project-state";
 import { useWorkspaceDraftIssues } from "@/hooks/store/workspace-draft";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 import { useProjectIssueProperties } from "@/hooks/use-project-issue-properties";
+import { useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import { useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
+import { RegistrationAgentModal } from "@/components/issues/registration-agent-modal";
 // plane web imports
 import { DeDupeButtonRoot } from "@/plane-web/components/de-dupe/de-dupe-button";
 import { DuplicateModalRoot } from "@/plane-web/components/de-dupe/duplicate-modal";
@@ -109,6 +112,12 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   // recurrence (create-only)
   const [isRecurring, setIsRecurring] = useState<boolean>(false);
   const [recurrence, setRecurrence] = useState<TIssueRecurrence>(DEFAULT_RECURRENCE_VALUES);
+  // submit held until a registrar is picked (moving/creating into the
+  // registration state requires one - see plane.utils.registration_handoff)
+  const [pendingRegistrationSubmit, setPendingRegistrationSubmit] = useState<{
+    formData: Partial<TIssue>;
+    isDraft: boolean;
+  } | null>(null);
 
   // refs
   const editorRef = useRef<EditorRefApi>(null);
@@ -159,6 +168,11 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   } = methods;
 
   const projectId = watch("project_id");
+  const { getTransitionError } = useApprovalGateConfig(workspaceSlug?.toString(), projectId ?? undefined);
+  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(
+    workspaceSlug?.toString(),
+    projectId ?? undefined
+  );
   const activeAdditionalPropertiesLength = getActiveAdditionalPropertiesLength({
     projectId: projectId,
     workspaceSlug: workspaceSlug?.toString(),
@@ -221,7 +235,11 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workItemTemplateId]);
 
-  const handleFormSubmit = async (formData: Partial<TIssue>, is_draft_issue = false) => {
+  const handleFormSubmit = async (
+    formData: Partial<TIssue>,
+    is_draft_issue = false,
+    registrationAgentId: string | undefined = undefined
+  ) => {
     // Check if the editor is ready to discard
     if (!editorRef.current?.isEditorReadyToDiscard()) {
       setToast({
@@ -242,6 +260,28 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     )
       return;
 
+    // Pending Approval is a hard stop: a new work item (e.g. a copy of an
+    // approved one) can't start past it, and an edit can't skip it. The
+    // server refuses it regardless - this just explains it up front.
+    const targetStateId = formData.state_id;
+    const originalStateId = data?.id ? data.state_id : undefined;
+    const transitionError = !is_draft_issue ? getTransitionError(originalStateId, targetStateId) : null;
+    if (transitionError) {
+      setToast({ type: TOAST_TYPE.ERROR, title: t("error"), message: transitionError });
+      return;
+    }
+    // entering the registration state needs a registrar - ask before saving
+    const entersRegistration =
+      !is_draft_issue &&
+      !!targetStateId &&
+      isGatedState(targetStateId) &&
+      targetStateId !== originalStateId &&
+      !(data?.id && data?.has_registration_handoff);
+    if (entersRegistration && !registrationAgentId) {
+      setPendingRegistrationSubmit({ formData, isDraft: is_draft_issue });
+      return;
+    }
+
     const submitData = !data?.id
       ? formData
       : {
@@ -254,6 +294,14 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
 
     // this condition helps to move the issues from draft to project issues
     if (formData.hasOwnProperty("is_draft")) submitData.is_draft = formData.is_draft;
+
+    if (registrationAgentId) {
+      // Not a TIssue field — read off the raw request body by the server
+      Object.assign(submitData, {
+        registration_agent_id: registrationAgentId,
+        assignee_ids: Array.from(new Set([...(formData.assignee_ids ?? []), registrationAgentId])),
+      });
+    }
 
     // attach the recurrence rule on create when the toggle is enabled.
     // start_date falls back to the work item's start date.
@@ -626,6 +674,18 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
           </div>
         )}
       </div>
+      <RegistrationAgentModal
+        isOpen={!!pendingRegistrationSubmit}
+        handleClose={() => setPendingRegistrationSubmit(null)}
+        workspaceSlug={workspaceSlug?.toString() ?? ""}
+        projectId={projectId ?? ""}
+        eligibleAgentIds={eligibleAgentIds}
+        onSubmit={async (agentId) => {
+          if (!pendingRegistrationSubmit) return;
+          const { formData, isDraft: submitAsDraft } = pendingRegistrationSubmit;
+          await handleFormSubmit(formData, submitAsDraft, agentId);
+        }}
+      />
     </FormProvider>
   );
 });
