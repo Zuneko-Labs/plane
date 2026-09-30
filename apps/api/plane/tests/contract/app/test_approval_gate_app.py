@@ -16,6 +16,7 @@ import pytest
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from plane.utils.approval import REOPEN_APPROVAL_REQUIRED
 from plane.db.models import (
     ApprovalGateConfig,
     ApprovalRecord,
@@ -279,7 +280,7 @@ class TestApprovalGateOnStateTransition:
         assert not IssueComment.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db
-    def test_member_pulling_an_item_back_out_of_pending_approval_is_allowed(
+    def test_nobody_pulls_an_item_back_out_of_pending_approval_without_a_reopen_request(
         self,
         workspace,
         project,
@@ -289,16 +290,21 @@ class TestApprovalGateOnStateTransition:
         pending_approval_state,
         gate_config,
         non_approver,
+        create_user,
     ):
+        """Once sent for approval a work item is locked there - only an
+        accepted reopen request (or the approver's Send Back) moves it back."""
+        Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
         url = issue_url(workspace.slug, project.id, handover_issue.id)
 
-        for target in (sent_back_state, handover_state):
-            Issue.objects.filter(pk=handover_issue.id).update(state=pending_approval_state)
+        cases = [(non_approver, sent_back_state), (non_approver, handover_state), (create_user, handover_state)]
+        for user, target in cases:
             with patch("plane.app.views.issue.base.issue_activity"):
-                response = client_for(non_approver).patch(url, {"state_id": str(target.id)}, format="json")
-            assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
-            handover_issue.refresh_from_db()
-            assert handover_issue.state_id == target.id
+                response = client_for(user).patch(url, {"state_id": str(target.id)}, format="json")
+            assert response.status_code == status.HTTP_400_BAD_REQUEST, f"{target.name}: {response.data!r}"
+            assert response.data["error_code"] == REOPEN_APPROVAL_REQUIRED
+        handover_issue.refresh_from_db()
+        assert handover_issue.state_id == pending_approval_state.id
         assert not ApprovalRecord.objects.filter(issue=handover_issue).exists()
 
     @pytest.mark.django_db

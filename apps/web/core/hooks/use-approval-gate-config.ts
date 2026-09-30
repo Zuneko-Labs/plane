@@ -34,10 +34,41 @@ export const getPastPendingStateIds = (config: TApprovalGateStateIds | undefined
   return ids;
 };
 
+/** Error codes the server answers a refused reopen with (see plane.utils.approval). */
+export const REOPEN_APPROVAL_REQUIRED = "reopen_approval_required";
+
+/**
+ * Taking a work item that is in Pending Approval or signed off (past it)
+ * back to an earlier stage. Nobody — approvers included — does that
+ * directly: it takes a reopen request an approver accepts. The one
+ * exception is the approver's own Send Back out of Pending Approval, which
+ * is the rejection step itself (see isSentBackTransition).
+ */
+export const isApprovalReopenTransition = (args: {
+  config: (TApprovalGateStateIds & { sent_back_state_id?: string | null }) | undefined;
+  states: IState[] | undefined;
+  isApprover: boolean;
+  fromStateId: string | null | undefined;
+  toStateId: string | null | undefined;
+}) => {
+  const { config, states, isApprover, fromStateId, toStateId } = args;
+  if (!config || config.is_enabled === false) return false;
+  if (!fromStateId || !toStateId || fromStateId === toStateId) return false;
+  const pastPendingStateIds = getPastPendingStateIds(config, states);
+  if (pastPendingStateIds.has(toStateId)) return false; // forward
+  const pendingStateId = config.pending_approval_state_id;
+  if (pastPendingStateIds.has(fromStateId)) return true;
+  if (!pendingStateId || fromStateId !== pendingStateId) return false;
+  // leaving Pending Approval backwards - except the approver's Send Back
+  return !(isApprover && !!config.sent_back_state_id && toStateId === config.sent_back_state_id);
+};
+
 /**
  * Why moving from `fromStateId` (undefined when creating) into `toStateId`
  * is refused, or null when it is allowed — the client mirror of
- * plane.utils.approval.evaluate_approval_gate.
+ * plane.utils.approval.evaluate_approval_gate. A reopen (see
+ * isApprovalReopenTransition) is not refused here: callers ask for a reason
+ * or a reopen request instead.
  */
 export const getApprovalTransitionError = (args: {
   config: TApprovalGateStateIds | undefined;
@@ -80,7 +111,10 @@ export const SENT_FOR_APPROVAL_TOAST = {
  * Pending Approval is a hard stop for everyone: a state after it (higher
  * sequence, or the Approved state itself) can only be reached from Pending
  * Approval, and only by an approver; a work item can't be created past it.
- * Anyone may send a work item into Pending Approval or pull it back out.
+ * Anyone may send a work item into Pending Approval. Once in it (or past
+ * it), a work item doesn't come back: moving it to an earlier state is a
+ * reopen (`isReopenTransition`) — everyone, approvers
+ * included, files a reopen request an approver has to accept.
  *
  * The Sent Back state doubles as an ordinary workflow stage ("Xerox and
  * Binding" by default), so moving into it is a rejection (comment required)
@@ -118,6 +152,8 @@ export const useApprovalGateConfig = (workspaceSlug: string | undefined, project
     getTransitionError,
     isTransitionAllowed: (fromStateId: string | null | undefined, toStateId: string | null | undefined) =>
       getTransitionError(fromStateId, toStateId) === null,
+    isReopenTransition: (fromStateId: string | null | undefined, toStateId: string | null | undefined) =>
+      isApprovalReopenTransition({ config, states: projectStates, isApprover, fromStateId, toStateId }),
     // Moving a work item into Pending Approval IS the act of submitting it
     // for sign-off — the server notifies the project's approvers (see
     // plane.bgtasks.notification_task.notify_pending_approval). Callers use

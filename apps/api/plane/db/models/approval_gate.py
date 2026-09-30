@@ -89,6 +89,9 @@ class ApprovalRecord(ProjectBaseModel):
     class Decision(models.TextChoices):
         APPROVED = "approved", "Approved"
         SENT_BACK = "sent_back", "Sent Back"
+        # an approved work item moved back to an earlier stage - by an
+        # approver directly, or through an approved ApprovalReopenRequest
+        REOPENED = "reopened", "Reopened"
 
     issue = models.ForeignKey(
         "db.Issue",
@@ -111,3 +114,74 @@ class ApprovalRecord(ProjectBaseModel):
         verbose_name_plural = "Approval Records"
         db_table = "approval_records"
         ordering = ("-created_at",)
+
+
+class ApprovalReopenRequest(ProjectBaseModel):
+    """A request to take an approved work item back to an earlier stage.
+
+    Once a work item is past Pending Approval (signed off), nobody but a
+    project approver may move it back (see plane.utils.approval). Everyone
+    else asks through one of these, with a reason; the work item only moves
+    when an approver accepts it (see WorkspaceReopenRequestDecisionEndpoint).
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    issue = models.ForeignKey(
+        "db.Issue",
+        on_delete=models.CASCADE,
+        related_name="approval_reopen_requests",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    # SET_NULL: a state deleted while a request waits must not delete the
+    # request (and its reason) with it - the decision endpoint refuses to
+    # apply a request whose target state is gone.
+    from_state = models.ForeignKey(
+        "db.State",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    to_state = models.ForeignKey(
+        "db.State",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_comment = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.issue_id} reopen {self.status} by {self.requested_by_id}"
+
+    class Meta:
+        verbose_name = "Approval Reopen Request"
+        verbose_name_plural = "Approval Reopen Requests"
+        db_table = "approval_reopen_requests"
+        ordering = ("-created_at",)
+        constraints = [
+            # one open request per work item at a time
+            models.UniqueConstraint(
+                fields=["issue"],
+                condition=Q(status="pending", deleted_at__isnull=True),
+                name="approval_reopen_request_unique_pending_issue",
+            )
+        ]

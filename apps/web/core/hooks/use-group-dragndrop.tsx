@@ -8,15 +8,21 @@ import { useState } from "react";
 import { useParams } from "next/navigation";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import type { EIssuesStoreType, TIssue, TIssueGroupByOptions, TIssueOrderByOptions } from "@plane/types";
-import { ApprovalSentBackModal } from "@/components/issues/approval-sent-back-modal";
+import { ApprovalSentBackModal, REOPEN_REQUEST_COPY } from "@/components/issues/approval-sent-back-modal";
 import type { GroupDropLocation } from "@/components/issues/issue-layouts/utils";
 import { handleGroupDragDrop } from "@/components/issues/issue-layouts/utils";
 import { RegistrationAgentModal } from "@/components/issues/registration-agent-modal";
 import approvalGateService from "@/services/approval-gate.service";
 import registrationHandoffService from "@/services/registration-handoff.service";
 import { ISSUE_FILTER_DEFAULT_DATA } from "@/store/issue/helpers/base-issues.store";
-import { getApprovalTransitionError, SENT_FOR_APPROVAL_TOAST } from "./use-approval-gate-config";
-import { REGISTRATION_AGENT_REQUIRED } from "./use-registration-handoff-config";
+import {
+  getApprovalTransitionError,
+  isApprovalReopenTransition,
+  REOPEN_APPROVAL_REQUIRED,
+  SENT_FOR_APPROVAL_TOAST,
+} from "./use-approval-gate-config";
+import { getNeedsRegistrar, REGISTRATION_AGENT_REQUIRED } from "./use-registration-handoff-config";
+import { htmlToPlainText, REOPEN_REQUEST_SENT_TOAST } from "./use-work-item-state-transition";
 import { useMember } from "./store/use-member";
 import { useProjectState } from "./store/use-project-state";
 import { useIssueDetail } from "./store/use-issue-detail";
@@ -50,6 +56,8 @@ type TPendingSentBackDrop = {
   issueId: string;
   data: Partial<TIssue>;
 };
+
+type TPendingReopenDrop = TPendingSentBackDrop;
 
 export const useGroupIssuesDragNDrop = (
   storeType: DNDStoreType,
@@ -89,6 +97,11 @@ export const useGroupIssuesDragNDrop = (
   // cancelled. The server still enforces this and the approver-only rule
   // regardless of whether this modal was ever shown.
   const [pendingSentBackDrop, setPendingSentBackDrop] = useState<TPendingSentBackDrop | null>(null);
+
+  // Dropping a pending-approval or approved card onto an earlier column is
+  // a reopen: it files a reopen request (approvers included) and the card
+  // stays put - never applied optimistically.
+  const [pendingReopenDrop, setPendingReopenDrop] = useState<TPendingReopenDrop | null>(null);
 
   /**
    * update Issue on Drop, checks if modules or cycles are changed and then calls appropriate functions
@@ -173,15 +186,38 @@ export const useGroupIssuesDragNDrop = (
         return;
       }
 
-      // Only the first entry into the registration state needs a registrar —
-      // an item already handed off keeps the one it was given.
-      const alreadyHandedOff = !!getIssueById(issueId)?.has_registration_handoff;
-      if (registrationConfig && registrationConfig.trigger_state_id === stateId && !alreadyHandedOff) {
+      // A work item pending approval or approved doesn't come back until an
+      // approver accepts a reopen request (except the approver's Send Back).
+      if (
+        isApprovalReopenTransition({
+          config: approvalConfig,
+          states: getProjectStates(projectId),
+          isApprover,
+          fromStateId,
+          toStateId: stateId,
+        })
+      ) {
+        setPendingReopenDrop({ projectId, issueId, data });
+        return;
+      }
+
+      // Entering the registration state, or skipping past it, needs a
+      // registrar the first time — an item already handed off keeps the one
+      // it was given.
+      if (
+        getNeedsRegistrar({
+          triggerStateId: registrationConfig?.trigger_state_id,
+          states: getProjectStates(projectId),
+          fromStateId,
+          toStateId: stateId,
+          hasRegistrationHandoff: getIssueById(issueId)?.has_registration_handoff,
+        })
+      ) {
         setPendingRegistrationDrop({
           projectId,
           issueId,
           data,
-          eligibleAgentIds: getEligibleAgentIds(projectId, registrationConfig.eligible_agent_ids),
+          eligibleAgentIds: getEligibleAgentIds(projectId, registrationConfig?.eligible_agent_ids),
         });
         return;
       }
@@ -216,6 +252,11 @@ export const useGroupIssuesDragNDrop = (
           // the registrar on record is no longer eligible - ask for a new one
           if (err?.error_code === REGISTRATION_AGENT_REQUIRED) {
             setPendingRegistrationDrop({ projectId, issueId, data, eligibleAgentIds: getEligibleAgentIds(projectId) });
+            return;
+          }
+          // the local gate config was stale - fall back to the reopen request
+          if (err?.error_code === REOPEN_APPROVAL_REQUIRED) {
+            setPendingReopenDrop({ projectId, issueId, data });
             return;
           }
           setToast({ ...errorToastProps, message: err?.error ?? err?.detail ?? errorToastProps.message });
@@ -290,5 +331,23 @@ export const useGroupIssuesDragNDrop = (
     />
   );
 
-  return { handleOnDrop, registrationAgentModal, sentBackModal };
+  const reopenModal = (
+    <ApprovalSentBackModal
+      {...REOPEN_REQUEST_COPY}
+      isOpen={!!pendingReopenDrop}
+      handleClose={() => setPendingReopenDrop(null)}
+      onSubmit={async (commentHtml) => {
+        if (!pendingReopenDrop?.data.state_id || !workspaceSlug) return;
+        const { projectId, issueId, data } = pendingReopenDrop;
+        await approvalGateService.createReopenRequest(workspaceSlug.toString(), projectId, issueId, {
+          state_id: data.state_id as string,
+          reason: htmlToPlainText(commentHtml),
+        });
+        setToast(REOPEN_REQUEST_SENT_TOAST);
+        setPendingReopenDrop(null);
+      }}
+    />
+  );
+
+  return { handleOnDrop, registrationAgentModal, sentBackModal, reopenModal };
 };

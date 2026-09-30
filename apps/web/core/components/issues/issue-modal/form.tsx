@@ -168,8 +168,11 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   } = methods;
 
   const projectId = watch("project_id");
-  const { getTransitionError } = useApprovalGateConfig(workspaceSlug?.toString(), projectId ?? undefined);
-  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(
+  const { getTransitionError, isReopenTransition } = useApprovalGateConfig(
+    workspaceSlug?.toString(),
+    projectId ?? undefined
+  );
+  const { needsRegistrar, eligibleAgentIds } = useRegistrationHandoffConfig(
     workspaceSlug?.toString(),
     projectId ?? undefined
   );
@@ -270,13 +273,23 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
       setToast({ type: TOAST_TYPE.ERROR, title: t("error"), message: transitionError });
       return;
     }
-    // entering the registration state needs a registrar - ask before saving
+    // a work item pending approval or approved can't be moved back from this
+    // form - that needs a reopen request, which the state picker asks for
+    if (!is_draft_issue && data?.id && isReopenTransition(originalStateId, targetStateId)) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("error"),
+        message:
+          "This work item is pending approval or approved. Change its state from the state picker to request a reopen — it only moves back once an approver accepts.",
+      });
+      return;
+    }
+    // entering the registration state, or skipping past it, needs a
+    // registrar - ask before saving
     const entersRegistration =
       !is_draft_issue &&
       !!targetStateId &&
-      isGatedState(targetStateId) &&
-      targetStateId !== originalStateId &&
-      !(data?.id && data?.has_registration_handoff);
+      needsRegistrar(originalStateId, targetStateId, !!(data?.id && data?.has_registration_handoff));
     if (entersRegistration && !registrationAgentId) {
       setPendingRegistrationSubmit({ formData, isDraft: is_draft_issue });
       return;

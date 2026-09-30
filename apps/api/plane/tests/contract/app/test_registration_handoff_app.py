@@ -437,6 +437,118 @@ class TestRegistrationHandoffOnCreate:
         mock_email.delay.assert_called_once()
 
 
+@pytest.fixture
+def after_registration_state(db, workspace, project):
+    return make_state(name="Xerox and Binding", workspace=workspace, project=project, group="started", sequence=30000)
+
+
+@pytest.fixture
+def before_registration_state(db, workspace, project):
+    return make_state(name="Draft Approval", workspace=workspace, project=project, group="started", sequence=15000)
+
+
+@pytest.fixture
+def cancelled_state(db, workspace, project):
+    return make_state(name="Cancelled", workspace=workspace, project=project, group="cancelled", sequence=90000)
+
+
+@pytest.mark.contract
+class TestRegistrationCannotBeSkipped:
+    @pytest.mark.django_db
+    def test_jumping_past_registration_without_a_registrar_is_rejected(
+        self, session_client, workspace, project, after_registration_state, drafter_issue, handoff_config
+    ):
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+        with patch(EMAIL_TASK) as mock_email:
+            response = session_client.patch(url, {"state_id": str(after_registration_state.id)}, format="json")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        assert response.data.get("error_code") == REGISTRATION_AGENT_REQUIRED
+        assert "can't be skipped" in response.data["error"]
+        drafter_issue.refresh_from_db()
+        assert drafter_issue.state_id != after_registration_state.id
+        mock_email.delay.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_jumping_past_registration_with_a_registrar_hands_off_and_emails(
+        self,
+        session_client,
+        workspace,
+        project,
+        after_registration_state,
+        drafter_issue,
+        handoff_config,
+        eligible_agent,
+        django_capture_on_commit_callbacks,
+    ):
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+        with (
+            patch("plane.app.views.issue.base.issue_activity"),
+            patch(EMAIL_TASK) as mock_email,
+            django_capture_on_commit_callbacks(execute=True),
+        ):
+            response = session_client.patch(
+                url,
+                {"state_id": str(after_registration_state.id), "registration_agent_id": str(eligible_agent.id)},
+                format="json",
+            )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        drafter_issue.refresh_from_db()
+        assert drafter_issue.state_id == after_registration_state.id
+        assert eligible_agent.id in assignee_ids(drafter_issue)
+        assert RegistrationHandoffRecord.objects.get(issue=drafter_issue).agent_id == eligible_agent.id
+        mock_email.delay.assert_called_once()
+
+    @pytest.mark.django_db
+    def test_moves_before_registration_and_into_cancelled_need_no_registrar(
+        self, session_client, workspace, project, before_registration_state, cancelled_state, drafter_issue, handoff_config
+    ):
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+        for target in (before_registration_state, cancelled_state):
+            with patch("plane.app.views.issue.base.issue_activity"):
+                response = session_client.patch(url, {"state_id": str(target.id)}, format="json")
+            assert response.status_code == status.HTTP_204_NO_CONTENT, f"{target.name}: {response.data!r}"
+
+    @pytest.mark.django_db
+    def test_item_with_a_registrar_on_record_moves_on_freely(
+        self, session_client, workspace, project, after_registration_state, drafter_issue, handoff_config, eligible_agent
+    ):
+        RegistrationHandoffRecord.objects.create(
+            issue=drafter_issue, project=project, workspace=workspace, agent=eligible_agent
+        )
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+        with patch("plane.app.views.issue.base.issue_activity"), patch(EMAIL_TASK) as mock_email:
+            response = session_client.patch(url, {"state_id": str(after_registration_state.id)}, format="json")
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+        mock_email.delay.assert_not_called()
+
+    @pytest.mark.django_db
+    def test_item_already_past_registration_is_not_re_asked_between_later_stages(
+        self, session_client, workspace, project, registration_state, after_registration_state, drafter_issue, handoff_config
+    ):
+        # a work item that got past registration before this rule existed
+        later_state = make_state(name="Closed", workspace=workspace, project=project, group="completed", sequence=40000)
+        Issue.objects.filter(pk=drafter_issue.pk).update(state=after_registration_state)
+        url = issue_url(workspace.slug, project.id, drafter_issue.id)
+        with patch("plane.app.views.issue.base.issue_activity"):
+            response = session_client.patch(url, {"state_id": str(later_state.id)}, format="json")
+        assert response.status_code == status.HTTP_204_NO_CONTENT, f"Got {response.status_code}: {response.data!r}"
+
+    @pytest.mark.django_db
+    def test_creating_past_registration_requires_a_registrar(
+        self, session_client, workspace, project, drafting_state, after_registration_state, module, handoff_config
+    ):
+        response = session_client.post(
+            issues_url(workspace.slug, project.id),
+            {"name": "Skipped", "state_id": str(after_registration_state.id), "module_ids": [str(module.id)]},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, f"Got {response.status_code}: {response.data!r}"
+        assert response.data.get("error_code") == REGISTRATION_AGENT_REQUIRED
+        assert not Issue.objects.filter(name="Skipped").exists()
+
+
 @pytest.mark.contract
 class TestRegistrationHandoffConfigEndpoint:
     @pytest.mark.django_db

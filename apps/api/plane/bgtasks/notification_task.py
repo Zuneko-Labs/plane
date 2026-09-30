@@ -216,10 +216,26 @@ def notify_pending_approval(issue_id, project_id, actor_id):
                 entity_identifier=issue_id,
                 entity_name="issue",
                 title=f'"{issue.name}" is pending your approval',
+                # shaped like an issue-activity notification so the inbox
+                # renders it (it skips notifications without issue_activity)
                 data={
                     "issue": {
                         "id": str(issue_id),
                         "name": issue.name,
+                        "identifier": project.identifier,
+                        "sequence_id": issue.sequence_id,
+                        "state_name": None,
+                        "state_group": None,
+                    },
+                    "issue_activity": {
+                        "id": None,
+                        "verb": "created",
+                        "field": "pending_approval",
+                        "actor": str(actor_id),
+                        "new_value": None,
+                        "old_value": None,
+                        "old_identifier": None,
+                        "new_identifier": None,
                     },
                 },
             )

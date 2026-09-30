@@ -27,6 +27,7 @@ from plane.bgtasks.notification_task import notify_pending_approval
 from plane.db.models import ApprovalGateConfig, ApprovalRecord, IssueComment, RegistrationHandoffConfig
 from plane.utils.approval import (
     APPROVAL_DECISION_APPROVED,
+    APPROVAL_DECISION_REOPENED,
     APPROVAL_DECISION_SENT_BACK,
     evaluate_approval_gate,
 )
@@ -76,6 +77,7 @@ def plan_state_change(
     agent_key="registration_agent_id",
     assignee_key="assignee_ids",
     requested_state_id=None,
+    reopen_approved=False,
 ):
     """Validate the state change carried by `mutable_request_data` (or passed
     explicitly as `requested_state_id`). `issue` is None when creating.
@@ -83,6 +85,10 @@ def plan_state_change(
     May edit the request data in place: folds the state alias, removes the
     gate-only keys, and adds the registrar to the assignees being saved.
     Call before taking the `requested_data` snapshot for activity tracking.
+
+    `reopen_approved` is only for applying an accepted ApprovalReopenRequest:
+    it lets a signed-off work item move back without the approver's own
+    reason (the request carries it, as `approval_comment_html`).
     """
     if mutable_request_data is not None:
         normalize_state_key(mutable_request_data, state_key, alias_key)
@@ -101,15 +107,18 @@ def plan_state_change(
         mutable_request_data.pop(agent_key, None)
         return plan
 
-    error, decision, enters_pending = evaluate_approval_gate(
-        project_id, original_state_id, plan.requested_state_id, actor, comment_html
+    error, error_code, decision, enters_pending = evaluate_approval_gate(
+        project_id, original_state_id, plan.requested_state_id, actor, comment_html, reopen_approved=reopen_approved
     )
     if error:
         mutable_request_data.pop(agent_key, None)
         plan.error = error
+        plan.error_code = error_code
         return plan
     plan.approval_decision = decision
-    plan.approval_comment_html = comment_html if decision == APPROVAL_DECISION_SENT_BACK else None
+    plan.approval_comment_html = (
+        comment_html if decision in (APPROVAL_DECISION_SENT_BACK, APPROVAL_DECISION_REOPENED) else None
+    )
     plan.enters_pending = enters_pending
 
     error, error_code, handoff = plan_registration_handoff(
@@ -133,20 +142,25 @@ def commit_state_change(plan, issue, actor):
     if plan is None or not plan.requested_state_id:
         return
 
-    if plan.approval_decision == APPROVAL_DECISION_SENT_BACK:
-        IssueComment.objects.create(
-            issue=issue,
-            project_id=issue.project_id,
-            workspace_id=issue.workspace_id,
-            actor=actor,
-            comment_html=plan.approval_comment_html,
-        )
+    if plan.approval_decision in (APPROVAL_DECISION_SENT_BACK, APPROVAL_DECISION_REOPENED):
+        if plan.approval_comment_html:
+            IssueComment.objects.create(
+                issue=issue,
+                project_id=issue.project_id,
+                workspace_id=issue.workspace_id,
+                actor=actor,
+                comment_html=plan.approval_comment_html,
+            )
         ApprovalRecord.objects.create(
             issue=issue,
             project_id=issue.project_id,
             workspace_id=issue.workspace_id,
             actor=actor,
-            decision=ApprovalRecord.Decision.SENT_BACK,
+            decision=(
+                ApprovalRecord.Decision.SENT_BACK
+                if plan.approval_decision == APPROVAL_DECISION_SENT_BACK
+                else ApprovalRecord.Decision.REOPENED
+            ),
             comment=plan.approval_comment_html,
         )
     elif plan.approval_decision == APPROVAL_DECISION_APPROVED:

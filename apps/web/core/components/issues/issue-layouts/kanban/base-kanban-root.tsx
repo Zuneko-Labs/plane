@@ -127,7 +127,7 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
     EUserPermissionsLevel.PROJECT
   );
 
-  const { handleOnDrop, registrationAgentModal, sentBackModal } = useGroupIssuesDragNDrop(
+  const { handleOnDrop, registrationAgentModal, sentBackModal, reopenModal } = useGroupIssuesDragNDrop(
     storeType,
     orderBy,
     group_by,
@@ -249,6 +249,7 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
       />
       {registrationAgentModal}
       {sentBackModal}
+      {reopenModal}
       {/* drag and delete component */}
       <div
         className={`fixed left-1/2 -translate-x-1/2 ${

@@ -8,11 +8,17 @@ import { useState } from "react";
 import { setToast, TOAST_TYPE } from "@plane/propel/toast";
 import type { TIssue } from "@plane/types";
 // components
-import { ApprovalSentBackModal } from "@/components/issues/approval-sent-back-modal";
+import { ApprovalSentBackModal, REOPEN_REQUEST_COPY } from "@/components/issues/approval-sent-back-modal";
 import { RegistrationAgentModal } from "@/components/issues/registration-agent-modal";
 // hooks
-import { SENT_FOR_APPROVAL_TOAST, useApprovalGateConfig } from "@/hooks/use-approval-gate-config";
+import {
+  REOPEN_APPROVAL_REQUIRED,
+  SENT_FOR_APPROVAL_TOAST,
+  useApprovalGateConfig,
+} from "@/hooks/use-approval-gate-config";
 import { REGISTRATION_AGENT_REQUIRED, useRegistrationHandoffConfig } from "@/hooks/use-registration-handoff-config";
+// services
+import approvalGateService from "@/services/approval-gate.service";
 
 type TStateTransitionWorkItem = Pick<TIssue, "id" | "state_id"> &
   Partial<Pick<TIssue, "assignee_ids" | "has_registration_handoff">>;
@@ -24,6 +30,19 @@ type TUseWorkItemStateTransitionArgs = {
   /** Persists the change (optimistic store update + PATCH). Must reject on API errors. */
   onUpdate: (data: Partial<TIssue>) => Promise<unknown>;
 };
+
+/** The reason modals hand back escaped HTML; reopen requests store plain text. */
+export const htmlToPlainText = (html: string) =>
+  new DOMParser()
+    // keep paragraph breaks as line breaks
+    .parseFromString(html.replace(/<\/p>\s*<p/g, "</p>\n<p"), "text/html")
+    .body.textContent?.trim() ?? "";
+
+export const REOPEN_REQUEST_SENT_TOAST = {
+  type: TOAST_TYPE.SUCCESS,
+  title: "Reopen requested",
+  message: "A project approver has to accept it before the work item moves back.",
+} as const;
 
 const getErrorBody = (error: unknown): { error?: string; error_code?: string } | undefined => {
   if (!error || typeof error !== "object") return undefined;
@@ -43,8 +62,13 @@ const getErrorBody = (error: unknown): { error?: string; error_code?: string } |
  *  - a move the approval gate refuses is explained with a toast, no request;
  *  - moving into the registration state asks for a registrar (and again if
  *    the server says the one on record is no longer eligible);
+ *  - moving into (or skipping past) the registration state asks for a
+ *    registrar when none is on record;
  *  - an approver bouncing a work item out of Pending Approval asks for a
  *    comment;
+ *  - moving a work item that is pending approval or approved back asks
+ *    for a reopen request with a reason - for everyone, approvers
+ *    included; the item stays put until an approver accepts it;
  *  - entering Pending Approval confirms it went to the approvers.
  * The server enforces all of it regardless (see plane.utils.state_transition).
  *
@@ -53,11 +77,20 @@ const getErrorBody = (error: unknown): { error?: string; error_code?: string } |
 export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs) => {
   const { workspaceSlug, projectId, workItem, onUpdate } = args;
   const [pendingRegistrationStateId, setPendingRegistrationStateId] = useState<string | null>(null);
+  // what the move that ran into "name a registrar" already carried (e.g. a
+  // reopen reason), re-sent together with the registrar
+  const [pendingRegistrationExtra, setPendingRegistrationExtra] = useState<Partial<TIssue>>({});
   const [pendingSentBackStateId, setPendingSentBackStateId] = useState<string | null>(null);
+  const [pendingReopenRequestStateId, setPendingReopenRequestStateId] = useState<string | null>(null);
 
-  const { getTransitionError, isTransitionAllowed, isSentBackTransition, isSendForApprovalTransition } =
-    useApprovalGateConfig(workspaceSlug, projectId ?? undefined);
-  const { isGatedState, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId ?? undefined);
+  const {
+    getTransitionError,
+    isTransitionAllowed,
+    isSentBackTransition,
+    isSendForApprovalTransition,
+    isReopenTransition,
+  } = useApprovalGateConfig(workspaceSlug, projectId ?? undefined);
+  const { needsRegistrar, eligibleAgentIds } = useRegistrationHandoffConfig(workspaceSlug, projectId ?? undefined);
 
   const showError = (message: string) => setToast({ type: TOAST_TYPE.ERROR, title: "Can't move work item", message });
 
@@ -71,8 +104,15 @@ export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs
       const body = getErrorBody(error);
       if (body?.error_code === REGISTRATION_AGENT_REQUIRED && !("registration_agent_id" in data)) {
         // the registrar on record is gone (left the project, removed from
-        // the pool) - ask for a new one instead of failing
+        // the pool), or the move skips registration - ask for one instead
+        // of failing
+        setPendingRegistrationExtra(data);
         setPendingRegistrationStateId(stateId);
+        return;
+      }
+      // the local config was stale - fall back to the reopen request
+      if (body?.error_code === REOPEN_APPROVAL_REQUIRED && !fromModal) {
+        setPendingReopenRequestStateId(stateId);
         return;
       }
       if (!fromModal) showError(body?.error ?? "The state could not be changed. Please try again.");
@@ -88,9 +128,18 @@ export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs
       showError(transitionError);
       return;
     }
-    // only the first handoff needs a registrar; a work item that already
-    // has one keeps it on re-entry (server re-asks if it's no longer valid)
-    if (isGatedState(stateId) && !workItem.has_registration_handoff) {
+    // a work item pending approval or approved doesn't come back until an
+    // approver accepts a reopen request (the approver's own Send Back is
+    // the one exception - handled below)
+    if (isReopenTransition(workItem.state_id, stateId)) {
+      setPendingReopenRequestStateId(stateId);
+      return;
+    }
+    // entering the registration state, or skipping past it, needs a
+    // registrar - only the first time; a work item that already has one
+    // keeps it (server re-asks if it's no longer valid)
+    if (needsRegistrar(workItem.state_id, stateId, workItem.has_registration_handoff)) {
+      setPendingRegistrationExtra({});
       setPendingRegistrationStateId(stateId);
       return;
     }
@@ -105,7 +154,10 @@ export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs
     <>
       <RegistrationAgentModal
         isOpen={!!pendingRegistrationStateId}
-        handleClose={() => setPendingRegistrationStateId(null)}
+        handleClose={() => {
+          setPendingRegistrationStateId(null);
+          setPendingRegistrationExtra({});
+        }}
         workspaceSlug={workspaceSlug ?? ""}
         projectId={projectId ?? ""}
         eligibleAgentIds={eligibleAgentIds}
@@ -114,6 +166,7 @@ export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs
           await submit(
             pendingRegistrationStateId,
             {
+              ...pendingRegistrationExtra,
               // Not TIssue fields — one-shot instructions the backend reads off
               // the raw request body (see plane.utils.registration_handoff).
               registration_agent_id: agentId,
@@ -141,6 +194,19 @@ export const useWorkItemStateTransition = (args: TUseWorkItemStateTransitionArgs
             } as Partial<TIssue>,
             true
           );
+        }}
+      />
+      <ApprovalSentBackModal
+        {...REOPEN_REQUEST_COPY}
+        isOpen={!!pendingReopenRequestStateId}
+        handleClose={() => setPendingReopenRequestStateId(null)}
+        onSubmit={async (commentHtml) => {
+          if (!pendingReopenRequestStateId || !workspaceSlug || !projectId || !workItem) return;
+          await approvalGateService.createReopenRequest(workspaceSlug, projectId, workItem.id, {
+            state_id: pendingReopenRequestStateId,
+            reason: htmlToPlainText(commentHtml),
+          });
+          setToast(REOPEN_REQUEST_SENT_TOAST);
         }}
       />
     </>
