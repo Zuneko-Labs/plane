@@ -6,3 +6,4 @@
 
 export { ApprovalQueueTable } from "./approval-queue-table";
 export { ApprovalRecordsTable } from "./approval-records-table";
+export { ReopenRequestsTable } from "./reopen-requests-table";

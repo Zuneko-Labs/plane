@@ -4,300 +4,263 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import useSWR from "swr";
 import { observer } from "mobx-react";
 import { CheckCircle2 } from "lucide-react";
-import { EUserPermissions, EUserPermissionsLevel, ISSUE_PRIORITIES } from "@plane/constants";
-import { setToast, TOAST_TYPE } from "@plane/propel/toast";
+import { ISSUE_PRIORITIES } from "@plane/constants";
 import { DueDatePropertyIcon, PriorityIcon } from "@plane/propel/icons";
+import { setToast, TOAST_TYPE } from "@plane/propel/toast";
 import { Tooltip } from "@plane/propel/tooltip";
-import { Avatar, AvatarGroup, Button } from "@plane/ui";
 import type { TIssue } from "@plane/types";
-import { cn, getFileURL, renderFormattedDate, shouldHighlightIssueDueDate } from "@plane/utils";
-import { IssueService } from "@/services/issue/issue.service";
+import { Avatar, AvatarGroup, Button } from "@plane/ui";
+import { cn, getFileURL, renderFormattedDate } from "@plane/utils";
 import { ApprovalSentBackModal } from "@/components/issues/approval-sent-back-modal";
-import { useLabel } from "@/hooks/store/use-label";
 import { useMember } from "@/hooks/store/use-member";
-import { useModule } from "@/hooks/store/use-module";
-import { useProjectState } from "@/hooks/store/use-project-state";
-import { useUserPermissions } from "@/hooks/store/user";
-
-interface IApprovalQueueTableProps {
-  workspaceSlug: string;
-  projectId: string;
-  pendingStateId: string;
-  approvedStateId: string;
-  sentBackStateId: string | null;
-}
+import { REGISTRATION_AGENT_REQUIRED } from "@/hooks/use-registration-handoff-config";
+import type { TWorkspacePendingApproval } from "@/services/approval-gate.service";
+import approvalGateService, { workspacePendingApprovalsSWRKey } from "@/services/approval-gate.service";
+import { IssueService } from "@/services/issue/issue.service";
+import {
+  ApprovalEmptyState,
+  ApprovalLoadingState,
+  ModulesCell,
+  ProjectCell,
+  TD_CLASS,
+  TH_CLASS,
+  WorkItemCell,
+  WorkItemHeaderCell,
+  workItemLink,
+} from "./approval-table-cells";
+import { ProjectRegistrarModal } from "./project-registrar-modal";
 
 const issueService = new IssueService();
 
-interface IApprovalQueueRowProps {
-  issue: TIssue;
-  itemLink: string;
+type Props = {
+  workspaceSlug: string;
+};
+
+const ApprovalQueueRow = observer(function ApprovalQueueRow(props: {
+  workspaceSlug: string;
+  item: TWorkspacePendingApproval;
   isApproving: boolean;
-  canApprove: boolean;
-  canSendBack: boolean;
   onApprove: () => void;
   onSendBack: () => void;
-}
+}) {
+  const { workspaceSlug, item, isApproving, onApprove, onSendBack } = props;
+  const { getUserDetails } = useMember();
 
-const ApprovalQueueRow = observer(
-  ({ issue, itemLink, isApproving, canApprove, canSendBack, onApprove, onSendBack }: IApprovalQueueRowProps) => {
-    const { getUserDetails } = useMember();
-    const { getModuleById } = useModule();
-    const { getLabelById } = useLabel();
-    const { getStateById } = useProjectState();
+  const priorityDetails = ISSUE_PRIORITIES.find((p) => p.key === item.priority);
+  const assignees = item.assignee_ids.map((id) => getUserDetails(id)).filter(Boolean);
+  const isOverdue = !!item.target_date && new Date(item.target_date) < new Date(new Date().toDateString());
 
-    const priorityDetails = ISSUE_PRIORITIES.find((p) => p.key === issue.priority);
-    const assignees = (issue.assignee_ids ?? []).map((id) => getUserDetails(id)).filter(Boolean);
-    const modules = (issue.module_ids ?? []).map((id) => getModuleById(id)).filter(Boolean);
-    const labels = (issue.label_ids ?? []).map((id) => getLabelById(id)).filter(Boolean);
-    const isDueDateOverdue = shouldHighlightIssueDueDate(issue.target_date, getStateById(issue.state_id)?.group);
-
-    return (
-      <tr className="group">
-        {/* work item — sticky first column, mirrors the spreadsheet layout */}
-        <td className="left-0 z-[15] h-11 min-w-60 border-r-[0.5px] border-b-[0.5px] border-subtle bg-surface-1 md:sticky">
-          <a href={itemLink} className="flex h-full w-full items-center gap-2 px-page-x hover:underline">
-            <span className="flex-shrink-0 text-13 text-tertiary">{issue.sequence_id}</span>
-            <span className="truncate text-13 text-primary">{issue.name}</span>
-          </a>
-        </td>
-        <td className="h-11 min-w-36 border-r-[0.5px] border-b-[0.5px] border-subtle px-4 text-13">
-          {assignees.length > 0 ? (
-            <div className="flex items-center gap-1.5">
-              <AvatarGroup size="md">
-                {assignees.map((user) => (
-                  <Avatar key={user?.id} name={user?.display_name} src={getFileURL(user?.avatar_url ?? "")} />
-                ))}
-              </AvatarGroup>
-              <span className="truncate text-secondary">
-                {assignees.length === 1 ? assignees[0]?.display_name : `${assignees.length} members`}
-              </span>
-            </div>
-          ) : (
-            <span className="text-tertiary">Unassigned</span>
-          )}
-        </td>
-        <td className="h-11 min-w-36 border-r-[0.5px] border-b-[0.5px] border-subtle px-4 text-13">
+  return (
+    <tr className="group">
+      <WorkItemCell
+        href={workItemLink(workspaceSlug, item.project_id, item.id)}
+        projectIdentifier={item.project_identifier}
+        sequenceId={item.sequence_id}
+        name={item.name}
+      />
+      <ProjectCell name={item.project_name} />
+      <ModulesCell modules={item.modules} />
+      <td className={TD_CLASS}>
+        {assignees.length > 0 ? (
           <div className="flex items-center gap-1.5">
-            <div
-              className={cn({
-                // highlight just the icon, matching the priority dropdown's treatment
-                "rounded-sm border border-priority-urgent p-0.5": issue.priority === "urgent",
-              })}
-            >
-              <PriorityIcon priority={issue.priority} size={12} className="flex-shrink-0" />
-            </div>
-            <span
-              className={cn("truncate", {
-                "text-secondary": issue.priority && issue.priority !== "none",
-                "text-placeholder": !issue.priority || issue.priority === "none",
-              })}
-            >
-              {priorityDetails?.title ?? "None"}
+            <AvatarGroup size="md">
+              {assignees.map((user) => (
+                <Avatar key={user?.id} name={user?.display_name} src={getFileURL(user?.avatar_url ?? "")} />
+              ))}
+            </AvatarGroup>
+            <span className="truncate text-secondary">
+              {assignees.length === 1 ? assignees[0]?.display_name : `${assignees.length} members`}
             </span>
           </div>
-        </td>
-        <td className="h-11 min-w-36 border-r-[0.5px] border-b-[0.5px] border-subtle px-4 text-13">
-          {issue.target_date ? (
-            <div
-              className={cn("flex items-center gap-1.5", {
-                "text-danger-primary": isDueDateOverdue,
-              })}
-            >
-              <DueDatePropertyIcon className="h-3 w-3 flex-shrink-0" />
-              <span>{renderFormattedDate(issue.target_date)}</span>
+        ) : (
+          <span className="text-tertiary">Unassigned</span>
+        )}
+      </td>
+      <td className={TD_CLASS}>
+        <div className="flex items-center gap-1.5">
+          <div className={cn({ "rounded-sm border border-priority-urgent p-0.5": item.priority === "urgent" })}>
+            <PriorityIcon priority={item.priority ?? "none"} size={12} className="flex-shrink-0" />
+          </div>
+          <span
+            className={cn("truncate", {
+              "text-secondary": item.priority && item.priority !== "none",
+              "text-placeholder": !item.priority || item.priority === "none",
+            })}
+          >
+            {priorityDetails?.title ?? "None"}
+          </span>
+        </div>
+      </td>
+      <td className={TD_CLASS}>
+        {item.target_date ? (
+          <div className={cn("flex items-center gap-1.5", { "text-danger-primary": isOverdue })}>
+            <DueDatePropertyIcon className="h-3 w-3 flex-shrink-0" />
+            <span>{renderFormattedDate(item.target_date)}</span>
+          </div>
+        ) : (
+          <span className="text-tertiary">No due date</span>
+        )}
+      </td>
+      <td className={TD_CLASS}>
+        {item.labels.length > 0 ? (
+          <Tooltip tooltipContent={item.labels.map((label) => label.name).join(", ")}>
+            <div className="flex items-center gap-1.5">
+              {item.labels.length === 1 ? (
+                <>
+                  <span
+                    className="h-2 w-2 flex-shrink-0 rounded-full"
+                    style={{ backgroundColor: item.labels[0].color ?? "#000000" }}
+                  />
+                  <span className="truncate">{item.labels[0].name}</span>
+                </>
+              ) : (
+                <span>{item.labels.length} labels</span>
+              )}
             </div>
-          ) : (
-            <span className="text-tertiary">No due date</span>
+          </Tooltip>
+        ) : (
+          <span className="text-tertiary">No labels</span>
+        )}
+      </td>
+      <td className="h-11 min-w-36 border-b-[0.5px] border-subtle px-4 text-13">
+        <div className="flex items-center justify-end gap-2">
+          {item.sent_back_state_id && (
+            <Button size="sm" variant="neutral-primary" onClick={onSendBack}>
+              Send back
+            </Button>
           )}
-        </td>
-        <td className="h-11 min-w-36 border-r-[0.5px] border-b-[0.5px] border-subtle px-4 text-13">
-          {modules.length > 0 ? (
-            <Tooltip tooltipContent={modules.map((m) => m?.name).join(", ")}>
-              <span className="block truncate">
-                {modules.length === 1 ? modules[0]?.name : `${modules.length} modules`}
-              </span>
-            </Tooltip>
-          ) : (
-            <span className="text-tertiary">No module</span>
-          )}
-        </td>
-        <td className="h-11 min-w-36 border-r-[0.5px] border-b-[0.5px] border-subtle px-4 text-13">
-          {labels.length > 0 ? (
-            <Tooltip tooltipContent={labels.map((l) => l?.name).join(", ")}>
-              <div className="flex items-center gap-1.5">
-                {labels.length === 1 ? (
-                  <>
-                    <span
-                      className="h-2 w-2 flex-shrink-0 rounded-full"
-                      style={{ backgroundColor: labels[0]?.color ?? "#000000" }}
-                    />
-                    <span className="truncate">{labels[0]?.name}</span>
-                  </>
-                ) : (
-                  <span>{labels.length} labels</span>
-                )}
-              </div>
-            </Tooltip>
-          ) : (
-            <span className="text-tertiary">No labels</span>
-          )}
-        </td>
-        <td className="h-11 min-w-36 border-b-[0.5px] border-subtle px-4 text-13">
-          <div className="flex items-center justify-end gap-2">
-            {/* only a project approver can sign off (the server enforces it too) */}
-            {canApprove ? (
-              <>
-                {canSendBack && (
-                  <Button size="sm" variant="neutral-primary" onClick={onSendBack}>
-                    Send back
-                  </Button>
-                )}
-                <Button size="sm" variant="primary" loading={isApproving} onClick={onApprove}>
-                  Approve
-                </Button>
-              </>
-            ) : (
-              <span className="text-13 text-tertiary">Awaiting approver</span>
-            )}
-          </div>
-        </td>
-      </tr>
-    );
-  }
-);
+          <Button size="sm" variant="primary" loading={isApproving} onClick={onApprove}>
+            Approve
+          </Button>
+        </div>
+      </td>
+    </tr>
+  );
+});
 
-export const ApprovalQueueTable = observer(
-  ({ workspaceSlug, projectId, pendingStateId, approvedStateId, sentBackStateId }: IApprovalQueueTableProps) => {
-    const [issues, setIssues] = useState<TIssue[]>([]);
-    const [selectedIssue, setSelectedIssue] = useState<TIssue | null>(null);
-    const [approvingId, setApprovingId] = useState<string | null>(null);
-    const { allowPermissions } = useUserPermissions();
-    const isApprover = allowPermissions(
-      [EUserPermissions.ADMIN],
-      EUserPermissionsLevel.PROJECT,
-      workspaceSlug,
-      projectId
-    );
+/**
+ * Every work item waiting in Pending Approval across the projects the user
+ * approves for. The server returns only those projects, and enforces the
+ * approver rule on every move regardless.
+ */
+export const ApprovalQueueTable = observer(function ApprovalQueueTable({ workspaceSlug }: Props) {
+  const [sendBackItem, setSendBackItem] = useState<TWorkspacePendingApproval | null>(null);
+  const [registrarItem, setRegistrarItem] = useState<TWorkspacePendingApproval | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
 
-    const { data, isLoading } = useSWR(
-      workspaceSlug && projectId ? `PENDING_APPROVAL_ISSUES_${workspaceSlug}_${projectId}_${pendingStateId}` : null,
-      async () => {
-        const response: any = await issueService.getIssuesWithParams(workspaceSlug, projectId, {});
-        const flat: TIssue[] = Array.isArray(response) ? response : (response?.results ?? []);
-        return flat.filter((issue) => issue.state_id === pendingStateId);
-      },
-      { refreshInterval: 30000 }
-    );
+  const { data, isLoading, mutate } = useSWR(
+    workspaceSlug ? workspacePendingApprovalsSWRKey(workspaceSlug) : null,
+    () => approvalGateService.fetchWorkspacePendingApprovals(workspaceSlug),
+    { refreshInterval: 30000 }
+  );
+  const items = data ?? [];
 
-    useEffect(() => {
-      if (data) setIssues(data);
-    }, [data]);
+  const removeItem = (id: string) =>
+    mutate((current) => (current ?? []).filter((item) => item.id !== id), { revalidate: false });
 
-    const handleApprove = async (issue: TIssue) => {
-      setApprovingId(issue.id);
-      try {
-        await issueService.patchIssue(workspaceSlug, projectId, issue.id, { state_id: approvedStateId });
-        setIssues((prev) => prev.filter((i) => i.id !== issue.id));
-      } catch (error: any) {
-        setToast({
-          type: TOAST_TYPE.ERROR,
-          title: "Couldn't approve",
-          message: error?.error ?? "The work item could not be approved. Please try again.",
-        });
-      } finally {
-        setApprovingId(null);
+  const approve = async (item: TWorkspacePendingApproval, registrationAgentId?: string) => {
+    const payload: Partial<TIssue> & { registration_agent_id?: string } = { state_id: item.approved_state_id };
+    if (registrationAgentId) {
+      // Not TIssue fields - the server reads them off the raw request body
+      payload.registration_agent_id = registrationAgentId;
+      payload.assignee_ids = Array.from(new Set([...item.assignee_ids, registrationAgentId]));
+    }
+    await issueService.patchIssue(workspaceSlug, item.project_id, item.id, payload as Partial<TIssue>);
+    await removeItem(item.id);
+    setToast({ type: TOAST_TYPE.SUCCESS, title: "Approved", message: `"${item.name}" was approved.` });
+  };
+
+  const handleApprove = async (item: TWorkspacePendingApproval) => {
+    setApprovingId(item.id);
+    try {
+      await approve(item);
+    } catch (error: any) {
+      // registration was skipped on the way here - name a registrar first
+      if (error?.error_code === REGISTRATION_AGENT_REQUIRED) {
+        setRegistrarItem(item);
+        return;
       }
-    };
-
-    const handleSentBackSubmit = async (commentHtml: string) => {
-      if (!selectedIssue || !sentBackStateId) return;
-      await issueService.patchIssue(workspaceSlug, projectId, selectedIssue.id, {
-        state_id: sentBackStateId,
-        approval_comment_html: commentHtml,
-      } as Partial<TIssue>);
-      setIssues((prev) => prev.filter((i) => i.id !== selectedIssue.id));
-      setSelectedIssue(null);
-    };
-
-    if (isLoading) {
-      return (
-        <div className="flex h-full items-center justify-center text-13 text-tertiary">
-          Loading approval queue&hellip;
-        </div>
-      );
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: "Couldn't approve",
+        message: error?.error ?? "The work item could not be approved. Please try again.",
+      });
+    } finally {
+      setApprovingId(null);
     }
+  };
 
-    if (issues.length === 0) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-layer-1">
-            <CheckCircle2 className="h-6 w-6 text-tertiary" strokeWidth={1.5} />
-          </div>
-          <div>
-            <h3 className="text-base font-medium text-primary">No pending approvals</h3>
-            <p className="mt-1 text-13 text-tertiary">All work items have been reviewed. Nice and tidy.</p>
-          </div>
-        </div>
-      );
-    }
+  const handleSentBackSubmit = async (commentHtml: string) => {
+    if (!sendBackItem?.sent_back_state_id) return;
+    await issueService.patchIssue(workspaceSlug, sendBackItem.project_id, sendBackItem.id, {
+      state_id: sendBackItem.sent_back_state_id,
+      approval_comment_html: commentHtml,
+    } as Partial<TIssue>);
+    await removeItem(sendBackItem.id);
+    setSendBackItem(null);
+  };
 
+  if (isLoading) return <ApprovalLoadingState label="Loading approval queue" />;
+
+  if (items.length === 0)
     return (
-      <>
-        <div className="vertical-scrollbar horizontal-scrollbar scrollbar-lg h-full w-full overflow-auto">
-          <table className="w-full overflow-y-auto bg-surface-1">
-            <thead className="sticky top-0 left-0 z-[12] border-b-[0.5px] border-subtle">
-              <tr>
-                <th className="left-0 z-[15] h-11 min-w-60 border-r-[0.5px] border-subtle bg-layer-1 text-13 font-medium md:sticky">
-                  <div className="flex h-full w-full items-center px-page-x">Work items</div>
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-left text-13 font-medium">
-                  Assignees
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-left text-13 font-medium">
-                  Priority
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-left text-13 font-medium">
-                  Due date
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-left text-13 font-medium">
-                  Modules
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-left text-13 font-medium">
-                  Labels
-                </th>
-                <th className="h-11 min-w-36 border border-t-0 border-b-0 border-subtle bg-layer-1 px-4 text-right text-13 font-medium">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {issues.map((issue) => (
-                <ApprovalQueueRow
-                  key={issue.id}
-                  issue={issue}
-                  itemLink={`/${workspaceSlug}/projects/${projectId}/issues/${issue.id}`}
-                  isApproving={approvingId === issue.id}
-                  canApprove={isApprover}
-                  canSendBack={!!sentBackStateId}
-                  onApprove={() => handleApprove(issue)}
-                  onSendBack={() => setSelectedIssue(issue)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <ApprovalSentBackModal
-          isOpen={!!selectedIssue}
-          handleClose={() => setSelectedIssue(null)}
-          onSubmit={handleSentBackSubmit}
-        />
-      </>
+      <ApprovalEmptyState
+        icon={<CheckCircle2 className="h-6 w-6 text-tertiary" strokeWidth={1.5} />}
+        title="No pending approvals"
+        description="Nothing is waiting on you in any of your projects."
+      />
     );
-  }
-);
+
+  return (
+    <>
+      <div className="vertical-scrollbar horizontal-scrollbar scrollbar-lg h-full w-full overflow-auto">
+        <table className="w-full overflow-y-auto bg-surface-1">
+          <thead className="sticky top-0 left-0 z-[12] border-b-[0.5px] border-subtle">
+            <tr>
+              <WorkItemHeaderCell />
+              <th className={TH_CLASS}>Project</th>
+              <th className={TH_CLASS}>Module</th>
+              <th className={TH_CLASS}>Assignees</th>
+              <th className={TH_CLASS}>Priority</th>
+              <th className={TH_CLASS}>Due date</th>
+              <th className={TH_CLASS}>Labels</th>
+              <th className={cn(TH_CLASS, "text-right")}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <ApprovalQueueRow
+                key={item.id}
+                workspaceSlug={workspaceSlug}
+                item={item}
+                isApproving={approvingId === item.id}
+                onApprove={() => handleApprove(item)}
+                onSendBack={() => setSendBackItem(item)}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <ApprovalSentBackModal
+        isOpen={!!sendBackItem}
+        handleClose={() => setSendBackItem(null)}
+        onSubmit={handleSentBackSubmit}
+      />
+      <ProjectRegistrarModal
+        workspaceSlug={workspaceSlug}
+        projectId={registrarItem?.project_id ?? null}
+        handleClose={() => setRegistrarItem(null)}
+        onSubmit={async (agentId) => {
+          if (!registrarItem) return;
+          await approve(registrarItem, agentId);
+          setRegistrarItem(null);
+        }}
+      />
+    </>
+  );
+});

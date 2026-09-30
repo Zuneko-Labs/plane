@@ -19,6 +19,10 @@ entry point goes through.
 The trigger state is configured per project via RegistrationHandoffConfig,
 keyed by a State FK (not a name string) — renaming the stage doesn't break
 this rule.
+
+Registration can't be skipped either: a work item jumping from an earlier
+stage (or created) straight into a stage after the registration state,
+without ever having had a registrar named, must name one on that move.
 """
 
 from dataclasses import dataclass
@@ -32,10 +36,16 @@ from plane.db.models import (
     ProjectMember,
     RegistrationHandoffConfig,
     RegistrationHandoffRecord,
+    State,
 )
 from plane.utils.permissions.base import ROLE
 
 REGISTRATION_AGENT_REQUIRED = "registration_agent_required"
+
+# never "after" the registration state: triage sits outside the flow, and
+# cancelling a work item is not a step forward in it (mirrors
+# plane.utils.approval._NON_FORWARD_GROUPS)
+_NON_FORWARD_GROUPS = {"triage", "cancelled"}
 
 
 @dataclass
@@ -76,18 +86,33 @@ def get_eligible_agent_ids(project_id, config=None):
     return member_ids
 
 
-def plan_registration_handoff(project_id, issue, requested_state_id, mutable_request_data, agent_key):
-    """Validate a move into the registration state. No side effects apart from
-    removing `agent_key` from the request data.
+def _is_at_or_past_registration(state, trigger_state):
+    """`state` is a {"id", "sequence", "group"} dict, or None."""
+    if state is None:
+        return False
+    if str(state["id"]) == str(trigger_state.id):
+        return True
+    return state["group"] not in _NON_FORWARD_GROUPS and state["sequence"] > trigger_state.sequence
 
-    Returns (error, error_code, plan). `plan` is None when the move isn't
-    into the configured registration state.
+
+def plan_registration_handoff(project_id, issue, requested_state_id, mutable_request_data, agent_key):
+    """Validate a move into, or past, the registration state. No side
+    effects apart from removing `agent_key` from the request data.
+
+    Returns (error, error_code, plan). `plan` is None when the move doesn't
+    need a registrar.
 
     Naming a registrar is required the first time a work item enters the
     state. On re-entry the registrar on record is reused (and re-notified) —
     unless they are no longer eligible (left the project, became a guest,
     were removed from the eligible pool), in which case a new one must be
     named. A registrar named explicitly always wins.
+
+    Skipping the state is treated as entering it: a move from before the
+    registration state (or a create) into any state after it needs a
+    registrar too, unless the work item already has one on record. A work
+    item already at or past the registration state is not re-asked when it
+    moves between later stages.
     """
     requested_agent_id = mutable_request_data.pop(agent_key, None)
 
@@ -98,18 +123,39 @@ def plan_registration_handoff(project_id, issue, requested_state_id, mutable_req
         return None, None, None  # not actually a transition
 
     config = get_registration_handoff_config(project_id)
-    if config is None or requested_state_id != str(config.trigger_state_id):
+    if config is None or config.trigger_state is None:
         return None, None, None
+    trigger_state = config.trigger_state
 
-    eligible_ids = get_eligible_agent_ids(project_id, config)
     existing_record = (
         RegistrationHandoffRecord.objects.filter(issue_id=issue.id).first() if issue is not None else None
     )
 
+    target_name = trigger_state.name
+    if requested_state_id != str(trigger_state.id):
+        if existing_record is not None:
+            return None, None, None  # a registrar was named already
+        state_ids = [requested_state_id] + ([issue.state_id] if issue is not None and issue.state_id else [])
+        states = {
+            str(state["id"]): state
+            for state in State.objects.filter(project_id=project_id, id__in=state_ids).values(
+                "id", "name", "sequence", "group"
+            )
+        }
+        target = states.get(requested_state_id)
+        if not _is_at_or_past_registration(target, trigger_state):
+            return None, None, None  # a stage before registration
+        original = states.get(str(issue.state_id)) if issue is not None and issue.state_id else None
+        if _is_at_or_past_registration(original, trigger_state):
+            return None, None, None  # already through registration - not a skip
+        target_name = target["name"]
+
+    eligible_ids = get_eligible_agent_ids(project_id, config)
+
     if requested_agent_id:
         if str(requested_agent_id) not in eligible_ids:
             return (
-                f'The selected registrar can\'t be assigned for "{config.trigger_state.name}". '
+                f"The selected registrar can't be assigned for \"{trigger_state.name}\". "
                 "Pick an active project member.",
                 REGISTRATION_AGENT_REQUIRED,
                 None,
@@ -120,8 +166,15 @@ def plan_registration_handoff(project_id, issue, requested_state_id, mutable_req
     if existing_record is not None and str(existing_record.agent_id) in eligible_ids:
         return None, None, RegistrationHandoffPlan(agent_id=str(existing_record.agent_id), record_action="keep")
 
+    if requested_state_id != str(trigger_state.id):
+        return (
+            f"\"{trigger_state.name}\" can't be skipped — moving to \"{target_name}\" requires naming a registrar "
+            f"({agent_key}).",
+            REGISTRATION_AGENT_REQUIRED,
+            None,
+        )
     return (
-        f'Moving to "{config.trigger_state.name}" requires naming a registrar ({agent_key}).',
+        f'Moving to "{trigger_state.name}" requires naming a registrar ({agent_key}).',
         REGISTRATION_AGENT_REQUIRED,
         None,
     )

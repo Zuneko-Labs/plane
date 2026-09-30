@@ -194,6 +194,13 @@ from .estimate.base import (
 from .naming_rule import WorkItemNamingRuleViewSet
 from .registration_handoff import RegistrationHandoffConfigViewSet
 from .approval_gate import ApprovalGateConfigViewSet, ApprovalRecordListEndpoint
+from .approval_workspace import (
+    IssueReopenRequestEndpoint,
+    WorkspaceApprovalRecordEndpoint,
+    WorkspacePendingApprovalEndpoint,
+    WorkspaceReopenRequestDecisionEndpoint,
+    WorkspaceReopenRequestEndpoint,
+)
 
 from .intake.base import (
     IntakeViewSet,

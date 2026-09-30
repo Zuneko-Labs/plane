@@ -22,6 +22,7 @@ import { cn } from "@plane/utils";
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
 // store hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
+import { useIsApproverInAnyProject } from "@/hooks/use-is-approver";
 import useLocalStorage from "@/hooks/use-local-storage";
 import {
   usePersonalNavigationPreferences,
@@ -42,6 +43,7 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // hooks
   const { preferences: personalPreferences } = usePersonalNavigationPreferences();
   const { preferences: workspacePreferences } = useWorkspaceNavigationPreferences();
+  const isApprover = useIsApproverInAnyProject();
   // translation
   const { t } = useTranslation();
 
@@ -78,9 +80,18 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
     // Sort personal items by sort_order
     personalItems.sort((a, b) => a.sort_order - b.sort_order);
 
+    // Approvals sits right below Stickies (or after the personal items when
+    // Stickies is hidden) - only for someone who approves in some project
+    const approvalsItem = WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["approvals"];
+    const orderedItems: typeof items = [...personalItems];
+    if (isApprover && approvalsItem) {
+      const stickiesIndex = orderedItems.findIndex((item) => item.key === "stickies");
+      orderedItems.splice(stickiesIndex === -1 ? orderedItems.length : stickiesIndex + 1, 0, approvalsItem);
+    }
+
     // Merge static items with sorted personal items
-    return [...items, ...personalItems];
-  }, [personalPreferences]);
+    return [...items, ...orderedItems];
+  }, [personalPreferences, isApprover]);
 
   const sortedNavigationItems = useMemo(
     () =>

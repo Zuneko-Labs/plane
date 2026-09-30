@@ -77,7 +77,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
   // router
   const { workspaceSlug, projectId } = useParams();
   const { getTransitionError } = useApprovalGateConfig(workspaceSlug?.toString(), projectId?.toString());
-  const { isGatedState } = useRegistrationHandoffConfig(workspaceSlug?.toString(), projectId?.toString());
+  const { needsRegistrar } = useRegistrationHandoffConfig(workspaceSlug?.toString(), projectId?.toString());
   // states
   const [isOpen, setIsOpen] = useState(isQuickAddOpen ?? false);
   // "" = one-time (not recurring); otherwise the chosen frequency
@@ -161,8 +161,9 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     // the registration column also needs a registrar, which only the full
     // create modal can ask for
     const hasModule = !isEpic && Array.isArray(payload.module_ids) && payload.module_ids.length > 0;
-    const needsRegistrar = !isEpic && !!payload.state_id && isGatedState(payload.state_id);
-    if (!isEpic && (!hasModule || needsRegistrar)) {
+    // creating in (or past) the registration state needs a registrar
+    const requiresRegistrar = !isEpic && !!payload.state_id && needsRegistrar(undefined, payload.state_id, false);
+    if (!isEpic && (!hasModule || requiresRegistrar)) {
       // createIssuePayload adds a client-side id/tempId for optimistic updates;
       // passing them makes the modal treat this as an existing work item (Update mode)
       const { id: _id, tempId: _tempId, ...prefillData } = payload;

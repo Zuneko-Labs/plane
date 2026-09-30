@@ -8,6 +8,7 @@ import { CalendarDays } from "lucide-react";
 import {
   AnalyticsIcon,
   ArchiveIcon,
+  CheckCircleFilledIcon,
   CycleIcon,
   DraftIcon,
   HomeIcon,
@@ -41,6 +42,8 @@ export const getSidebarNavigationItemIcon = (key: string, className: string = ""
       return <ArchiveIcon className={cn("size-4 flex-shrink-0", className)} />;
     case "stickies":
       return <MultipleStickyIcon className={cn("size-4 flex-shrink-0", className)} />;
+    case "approvals":
+      return <CheckCircleFilledIcon className={cn("size-4 flex-shrink-0", className)} />;
     case "team_calendar":
       return <CalendarDays className={cn("size-4 flex-shrink-0", className)} />;
   }

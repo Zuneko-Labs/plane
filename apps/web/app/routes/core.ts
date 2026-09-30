@@ -105,6 +105,11 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/stickies", "./(all)/[workspaceSlug]/(projects)/stickies/page.tsx"),
         ]),
 
+        // Approvals - one queue across every project the user approves for
+        layout("./(all)/[workspaceSlug]/(projects)/approvals/layout.tsx", [
+          route(":workspaceSlug/approvals", "./(all)/[workspaceSlug]/(projects)/approvals/page.tsx"),
+        ]),
+
         // Team Calendar
         layout("./(all)/[workspaceSlug]/(projects)/team-calendar/layout.tsx", [
           route(":workspaceSlug/team-calendar", "./(all)/[workspaceSlug]/(projects)/team-calendar/page.tsx"),
@@ -222,7 +227,7 @@ export const coreRoutes: RouteConfigEntry[] = [
             ),
           ]),
 
-          // Approval Queue
+          // Approval Queue - redirects to the workspace-wide approvals page
           route(
             ":workspaceSlug/projects/:projectId/approvals",
             "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/approvals/page.tsx"

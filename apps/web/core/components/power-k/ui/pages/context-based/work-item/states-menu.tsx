@@ -29,14 +29,17 @@ export const PowerKProjectStatesMenu = observer(function PowerKProjectStatesMenu
   // store hooks
   const { getProjectStateIds, getStateById } = useProjectState();
   const projectId = workItemDetails.project_id ?? undefined;
-  const { isTransitionAllowed, isSentBackTransition } = useApprovalGateConfig(workspaceSlug?.toString(), projectId);
-  const { isGatedState } = useRegistrationHandoffConfig(workspaceSlug?.toString(), projectId);
+  const { isTransitionAllowed, isSentBackTransition, isReopenTransition } = useApprovalGateConfig(
+    workspaceSlug?.toString(),
+    projectId
+  );
+  const { needsRegistrar } = useRegistrationHandoffConfig(workspaceSlug?.toString(), projectId);
   // derived values
   const projectStateIds = projectId ? getProjectStateIds(projectId) : undefined;
   const projectStates = projectStateIds ? projectStateIds.map((stateId) => getStateById(stateId)) : undefined;
-  // The palette closes on select, so it can't ask for a registrar or a
-  // send-back comment - those moves (and ones the approval gate refuses)
-  // are left to the state dropdown, which can.
+  // The palette closes on select, so it can't ask for a registrar, a
+  // send-back comment or a reopen reason - those moves (and ones the
+  // approval gate refuses) are left to the state dropdown, which can.
   const fromStateId = workItemDetails.state_id;
   const filteredProjectStates = projectStates
     ? projectStates.filter(
@@ -44,7 +47,8 @@ export const PowerKProjectStatesMenu = observer(function PowerKProjectStatesMenu
           !!state &&
           (state.id === fromStateId ||
             (isTransitionAllowed(fromStateId, state.id) &&
-              !(isGatedState(state.id) && !workItemDetails.has_registration_handoff) &&
+              !needsRegistrar(fromStateId, state.id, workItemDetails.has_registration_handoff) &&
+              !isReopenTransition(fromStateId, state.id) &&
               !isSentBackTransition(fromStateId, state.id)))
       )
     : undefined;

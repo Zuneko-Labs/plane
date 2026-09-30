@@ -92,6 +92,23 @@ export const BASE_NOTIFICATION_CONTENT_MAP: TNotificationContentMap = {
     value: null,
     showConnector: false,
   }),
+  // approval-gate notifications (see plane.bgtasks.notification_task and
+  // plane.app.views.approval_workspace)
+  pending_approval: () => ({
+    action: "sent this work item for your approval",
+    value: null,
+    showConnector: false,
+  }),
+  reopen_request: ({ verb, newValue }) => ({
+    action:
+      verb === "approved"
+        ? "approved moving this work item back to"
+        : verb === "rejected"
+          ? "rejected moving this work item back to"
+          : "asked to move this approved work item back to",
+    value: newValue ?? null,
+    showConnector: false,
+  }),
   None: () => ({
     action: null,
     value: "the work item and assigned it to you.",

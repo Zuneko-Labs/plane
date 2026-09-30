@@ -28,6 +28,13 @@ which use different words for the same roles ("Sent for Approval",
 rejection step, so there is no "sent back" alias beyond the literal name (or
 the default "Xerox and Binding") — a project without a state named that
 stays ungated for that role until one is added.
+
+Once a work item is in Pending Approval or signed off, it stays there:
+moving it back to any earlier stage ("reopening" it) is refused for
+everyone, approvers included. It is asked for through an
+ApprovalReopenRequest, which only moves the work item once an approver
+accepts it (see plane.app.views.approval_workspace). The approver's own
+Send Back out of Pending Approval is the one direct way back.
 """
 
 from plane.db.models import ApprovalGateConfig, ProjectMember, State
@@ -117,6 +124,10 @@ def is_send_back_transition(original_state_id, requested_state_id, pending_id, s
 
 APPROVAL_DECISION_APPROVED = "approved"
 APPROVAL_DECISION_SENT_BACK = "sent_back"
+APPROVAL_DECISION_REOPENED = "reopened"
+
+# error codes the clients branch on (see use-work-item-state-transition.tsx)
+REOPEN_APPROVAL_REQUIRED = "reopen_approval_required"
 
 # States in these groups are never "further along" than Pending Approval:
 # triage sits outside the flow, and cancelling a work item is not a step
@@ -150,14 +161,27 @@ def get_past_pending_state_ids(project_id):
     return _past_pending_state_ids(states, pending_id, approved_id)
 
 
-def evaluate_approval_gate(project_id, original_state_id, requested_state_id, actor, comment_html=None):
+def get_locked_state_ids(project_id):
+    """States a work item can't be moved back out of without an accepted
+    reopen request: Pending Approval and everything past it."""
+    pending_id, _, _ = resolve_gate_state_ids(project_id)
+    locked_ids = get_past_pending_state_ids(project_id)
+    if pending_id:
+        locked_ids = locked_ids | {pending_id}
+    return locked_ids
+
+
+def evaluate_approval_gate(
+    project_id, original_state_id, requested_state_id, actor, comment_html=None, reopen_approved=False
+):
     """Decide whether moving a work item from `original_state_id` (None when
     the work item is being created) into `requested_state_id` is allowed.
 
-    Returns (error, decision, enters_pending):
+    Returns (error, error_code, decision, enters_pending):
       * error — message to reject the request with (nothing may be written).
-      * decision — APPROVAL_DECISION_APPROVED / _SENT_BACK when the move is a
-        sign-off that must be recorded, else None.
+      * error_code — machine-readable reason for some errors, else None.
+      * decision — APPROVAL_DECISION_APPROVED / _SENT_BACK / _REOPENED when
+        the move is a sign-off decision that must be recorded, else None.
       * enters_pending — True when the move puts the work item into Pending
         Approval (approvers must be notified).
 
@@ -168,29 +192,36 @@ def evaluate_approval_gate(project_id, original_state_id, requested_state_id, ac
         from Pending Approval itself (or from a state that is already past
         it), and never on creation.
       * Leaving Pending Approval forwards is the sign-off — approvers only.
-      * Anyone may send a work item into Pending Approval or pull it back
-        out to an earlier stage; an approver bouncing it into the Sent Back
-        state is a rejection and must carry a comment.
+      * Anyone may send a work item into Pending Approval.
+      * Once in Pending Approval or past it, a work item doesn't come back:
+        moving it to an earlier stage is a reopen, for everyone (approvers
+        included) only through an ApprovalReopenRequest an approver accepts
+        — `reopen_approved` is set when applying one.
+      * The exception is the sign-off itself: an approver bouncing a work
+        item out of Pending Approval into the Sent Back state is a rejection
+        and must carry a comment.
     """
     if not requested_state_id:
-        return None, None, False
+        return None, None, None, False
 
     requested_state_id = str(requested_state_id)
     original_state_id = str(original_state_id) if original_state_id else None
     if requested_state_id == original_state_id:
-        return None, None, False  # not actually a transition
+        return None, None, None, False  # not actually a transition
 
     pending_id, approved_id, sent_back_id = resolve_gate_state_ids(project_id)
     if not pending_id and not approved_id:
-        return None, None, False  # gate off / not configured
+        return None, None, None, False  # gate off / not configured
 
     states = {
         str(state["id"]): state
-        for state in State.all_state_objects.filter(project_id=project_id, deleted_at__isnull=True).values("id", "name", "sequence", "group")
+        for state in State.all_state_objects.filter(project_id=project_id, deleted_at__isnull=True).values(
+            "id", "name", "sequence", "group"
+        )
     }
     target = states.get(requested_state_id)
     if target is None:
-        return None, None, False  # unknown state - the serializer rejects it
+        return None, None, None, False  # unknown state - the serializer rejects it
     pending = states.get(pending_id) if pending_id else None
     past_pending_ids = _past_pending_state_ids(states, pending_id, approved_id)
 
@@ -199,34 +230,54 @@ def evaluate_approval_gate(project_id, original_state_id, requested_state_id, ac
 
     if is_past_pending(requested_state_id):
         if is_past_pending(original_state_id):
-            return None, None, False  # already signed off - later stages are free
+            return None, None, None, False  # already signed off - later stages are free
         if not pending:
             # no Pending Approval state mapped: the Approved state alone is
             # the sign-off and stays approver-only.
             if not is_project_approver(actor, project_id):
-                return f'Only a project approver can move a work item to "{target["name"]}".', None, False
-            return None, APPROVAL_DECISION_APPROVED, False
+                return f'Only a project approver can move a work item to "{target["name"]}".', None, None, False
+            return None, None, APPROVAL_DECISION_APPROVED, False
         if original_state_id != pending_id:
             return (
                 f'A work item must be sent to "{pending["name"]}" and approved before it can move to '
                 f'"{target["name"]}".',
                 None,
+                None,
                 False,
             )
         if not is_project_approver(actor, project_id):
-            return f'Only a project approver can move a work item past "{pending["name"]}".', None, False
-        return None, APPROVAL_DECISION_APPROVED, False
+            return f'Only a project approver can move a work item past "{pending["name"]}".', None, None, False
+        return None, None, APPROVAL_DECISION_APPROVED, False
 
-    if pending_id and requested_state_id == pending_id:
-        return None, None, True
+    enters_pending = bool(pending_id) and requested_state_id == pending_id
 
-    if is_send_back_transition(original_state_id, requested_state_id, pending_id, sent_back_id) and (
-        is_project_approver(actor, project_id)
-    ):
-        if not comment_html or not str(comment_html).strip():
-            return "Sending back requires a comment explaining why.", None, False
-        return None, APPROVAL_DECISION_SENT_BACK, False
+    # Once a work item is in Pending Approval or signed off, it is locked
+    # there: going back to any earlier stage is a reopen, which nobody -
+    # approvers included - does directly. It goes through an
+    # ApprovalReopenRequest that an approver accepts (`reopen_approved`).
+    # The one exception is the approval step itself: an approver bouncing a
+    # work item out of Pending Approval into Sent Back, with a comment.
+    is_locked = is_past_pending(original_state_id) or (bool(pending_id) and original_state_id == pending_id)
+    if is_locked:
+        if is_send_back_transition(original_state_id, requested_state_id, pending_id, sent_back_id) and (
+            is_project_approver(actor, project_id)
+        ):
+            if not comment_html or not str(comment_html).strip():
+                return "Sending back requires a comment explaining why.", None, None, False
+            return None, None, APPROVAL_DECISION_SENT_BACK, False
+        if reopen_approved:
+            return None, None, APPROVAL_DECISION_REOPENED, enters_pending
+        where = "has been approved" if is_past_pending(original_state_id) else f'is in "{pending["name"]}"'
+        return (
+            f"This work item {where} and can't be moved back until an approver accepts a reopen request. "
+            "Request a reopen with a reason instead.",
+            REOPEN_APPROVAL_REQUIRED,
+            None,
+            False,
+        )
 
-    # every other move - including a member pulling a work item back out of
-    # Pending Approval - is ordinary work.
-    return None, None, False
+    if enters_pending:
+        return None, None, None, True
+
+    # every other move is ordinary work.
+    return None, None, None, False

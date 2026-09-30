@@ -257,6 +257,15 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
+  // one queue across every project the user approves for (project Admin) -
+  // listed right below Stickies, only for approvers (see SidebarMenuItems)
+  approvals: {
+    key: "approvals",
+    labelTranslationKey: "sidebar.approvals",
+    href: `/approvals/`,
+    access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
+    highlight: (pathname: string, url: string) => pathname.includes(url),
+  },
   drafts: {
     key: "drafts",
     labelTranslationKey: "drafts",

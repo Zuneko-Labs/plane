@@ -13,6 +13,25 @@ type Props = {
   isOpen: boolean;
   handleClose: () => void;
   onSubmit: (commentHtml: string) => Promise<void>;
+  // copy overrides - the same "reason required" dialog also backs reopening
+  // a work item that is pending approval or approved (see REOPEN_REQUEST_COPY)
+  title?: string;
+  description?: string;
+  placeholder?: string;
+  submitLabel?: string;
+  errorMessage?: string;
+};
+
+export type TApprovalReasonCopy = Pick<Props, "title" | "description" | "placeholder" | "submitLabel" | "errorMessage">;
+
+/** Moving a pending-approval or approved work item back is asked for, with a reason. */
+export const REOPEN_REQUEST_COPY: TApprovalReasonCopy = {
+  title: "Request to reopen",
+  description:
+    "This work item is pending approval or approved and can only come back once a project approver accepts. Give a reason — the work item stays where it is until then.",
+  placeholder: "Explain why this work item needs to come back",
+  submitLabel: "Send request",
+  errorMessage: "Could not send the reopen request. Please try again.",
 };
 
 /**
@@ -22,7 +41,16 @@ type Props = {
  * Cancel here just closes with no side effect.
  */
 export const ApprovalSentBackModal = (props: Props) => {
-  const { isOpen, handleClose, onSubmit } = props;
+  const {
+    isOpen,
+    handleClose,
+    onSubmit,
+    title = "Send back for changes",
+    description = "A comment is required — the assignee needs to know what to fix before resubmitting.",
+    placeholder = "Explain why this is being sent back",
+    submitLabel = "Send back",
+    errorMessage = "Could not send this work item back. Please try again.",
+  } = props;
   const [comment, setComment] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -44,7 +72,7 @@ export const ApprovalSentBackModal = (props: Props) => {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Error",
-        message: err?.error ?? err?.detail ?? "Could not send this work item back. Please try again.",
+        message: err?.error ?? err?.detail ?? errorMessage,
       });
       setIsSubmitting(false);
     }
@@ -53,16 +81,14 @@ export const ApprovalSentBackModal = (props: Props) => {
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
       <div className="p-5">
-        <h5 className="text-base font-medium text-primary">Send back for changes</h5>
-        <p className="mt-2 text-13 text-tertiary">
-          A comment is required — the assignee needs to know what to fix before resubmitting.
-        </p>
+        <h5 className="text-base font-medium text-primary">{title}</h5>
+        <p className="mt-2 text-13 text-tertiary">{description}</p>
         <div className="mt-4">
           <textarea
             autoFocus
             rows={4}
             className="w-full rounded-sm border border-subtle-1 bg-surface-1 p-2 text-13 text-primary placeholder:text-placeholder focus:outline-none"
-            placeholder="Explain why this is being sent back"
+            placeholder={placeholder}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />
@@ -73,7 +99,7 @@ export const ApprovalSentBackModal = (props: Props) => {
           Cancel
         </Button>
         <Button variant="primary" size="sm" onClick={handleConfirm} disabled={!comment.trim()} loading={isSubmitting}>
-          Send back
+          {submitLabel}
         </Button>
       </div>
     </ModalCore>
