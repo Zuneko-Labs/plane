@@ -169,6 +169,8 @@ apply_config() {
     # MinIO endpoint (dockerized) + enable, so uploads work inside compose network
     set_env "AWS_S3_ENDPOINT_URL" "http://plane-minio:9000" "$API_ENV"
     set_env "USE_MINIO"           "1"                        "$API_ENV"
+    # Browser-facing host for presigned upload/download URLs (proxy routes /uploads -> minio)
+    set_env "MINIO_PUBLIC_ENDPOINT_URL" "${APP_URL%/}"       "$API_ENV"
     # Live server secret must match between api and the live service
     set_env "LIVE_SERVER_SECRET_KEY" "secret-key" "$API_ENV"
     set_env "LIVE_SERVER_SECRET_KEY" "secret-key" "$ROOT_ENV"
