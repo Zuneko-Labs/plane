@@ -18,6 +18,8 @@ export type TIssueAttachment = {
   updated_at: string;
   updated_by: string;
   created_by: string;
+  // set when the upload moved the work item past the registration state
+  state_advanced?: boolean;
 };
 
 export type TIssueAttachmentUploadResponse = TFileSignedURLResponse & {

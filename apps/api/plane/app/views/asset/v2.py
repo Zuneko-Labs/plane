@@ -28,6 +28,22 @@ from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from plane.throttles.asset import AssetRateThrottle
 
 
+def get_comment_attachment_type(name, detected_type):
+    """
+    Resolve the MIME type for a document attached to a comment.
+    Returns None when the extension is not allowed or the detected
+    file signature contradicts it (e.g. an executable renamed to .pdf).
+    """
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    expected_type = settings.COMMENT_ATTACHMENT_EXTENSION_MIME_TYPES.get(extension)
+    if not expected_type:
+        return None
+    detected_type = detected_type or ""
+    if detected_type != expected_type and detected_type not in settings.COMMENT_ATTACHMENT_GENERIC_MIME_TYPES:
+        return None
+    return expected_type
+
+
 class UserAssetsV2Endpoint(BaseAPIView):
     """This endpoint is used to upload user profile images."""
 
@@ -601,13 +617,21 @@ class ProjectAssetEndpoint(BaseAPIView):
             "image/gif",
         ]
         if type not in allowed_types:
-            return Response(
-                {
-                    "error": "Invalid file type. Only JPEG, PNG, WebP, JPG and GIF files are allowed.",
-                    "status": False,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            # Comments may also carry document attachments (PDF, Word, Excel, ...)
+            comment_attachment_type = (
+                get_comment_attachment_type(name, type)
+                if entity_type == FileAsset.EntityTypeContext.COMMENT_DESCRIPTION
+                else None
             )
+            if not comment_attachment_type:
+                return Response(
+                    {
+                        "error": "Invalid file type. Only JPEG, PNG, WebP, JPG and GIF files are allowed.",
+                        "status": False,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            type = comment_attachment_type
 
         # Get the size limit
         size_limit = min(settings.FILE_SIZE_LIMIT, size)

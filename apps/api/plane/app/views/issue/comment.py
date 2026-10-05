@@ -24,6 +24,7 @@ from plane.bgtasks.issue_activities_task import issue_activity
 from plane.utils.host import base_host
 from plane.bgtasks.event_outbox import emit_model_event
 from plane.bgtasks.webhook_task import model_activity
+from plane.utils.registration_upload import advance_after_registrar_upload, html_file_refs, html_has_file
 
 
 class IssueCommentViewSet(BaseViewSet):
@@ -120,7 +121,11 @@ class IssueCommentViewSet(BaseViewSet):
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            # the registrar bringing back documents moves the work item past registration
+            state_advanced = html_has_file(serializer.instance.comment_html) and advance_after_registrar_upload(
+                issue_id, request.user, request
+            )
+            return Response({**serializer.data, "state_advanced": state_advanced}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @allow_permission(allowed_roles=[ROLE.ADMIN], creator=True, model=IssueComment)
@@ -128,6 +133,7 @@ class IssueCommentViewSet(BaseViewSet):
         issue_comment = IssueComment.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
         current_instance = json.dumps(IssueCommentSerializer(issue_comment).data, cls=DjangoJSONEncoder)
+        previous_file_refs = html_file_refs(issue_comment.comment_html)
         serializer = IssueCommentSerializer(issue_comment, data=request.data, partial=True)
         if serializer.is_valid():
             with transaction.atomic():
@@ -171,7 +177,11 @@ class IssueCommentViewSet(BaseViewSet):
 
                 transaction.on_commit(_dispatch_model_activity, robust=True)
 
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            # only a newly added file counts - editing the text around old ones doesn't
+            state_advanced = bool(
+                html_file_refs(serializer.instance.comment_html) - previous_file_refs
+            ) and advance_after_registrar_upload(issue_id, request.user, request)
+            return Response({**serializer.data, "state_advanced": state_advanced}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @allow_permission(allowed_roles=[ROLE.ADMIN], creator=True, model=IssueComment)

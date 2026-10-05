@@ -108,9 +108,9 @@ export class IssueCommentStore implements IIssueCommentStore {
 
     const commentIds = comments.map((comment) => comment.id);
     runInAction(() => {
-      update(this.comments, issueId, (_commentIds) => {
-        if (!_commentIds) return commentIds;
-        return uniq(concat(_commentIds, commentIds));
+      update(this.comments, issueId, (existingCommentIds) => {
+        if (!existingCommentIds) return commentIds;
+        return uniq(concat(existingCommentIds, commentIds));
       });
       comments.forEach((comment) => {
         this.rootIssueDetail.commentReaction.applyCommentReactions(comment.id, comment?.comment_reactions || []);
@@ -132,6 +132,7 @@ export class IssueCommentStore implements IIssueCommentStore {
       });
       set(this.commentMap, response.id, response);
     });
+    if (response.state_advanced) this.rootIssueDetail.refreshAfterStateAdvance(workspaceSlug, projectId, issueId);
 
     return response;
   };
@@ -162,6 +163,7 @@ export class IssueCommentStore implements IIssueCommentStore {
         set(this.commentMap, [commentId, "updated_at"], response.updated_at);
         set(this.commentMap, [commentId, "edited_at"], response.edited_at);
       });
+      if (response.state_advanced) this.rootIssueDetail.refreshAfterStateAdvance(workspaceSlug, projectId, issueId);
 
       return response;
     } catch (error) {

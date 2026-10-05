@@ -28,6 +28,7 @@ from plane.app.permissions import allow_permission, ROLE
 from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
+from plane.utils.registration_upload import advance_after_registrar_upload
 from plane.utils.host import base_host
 
 
@@ -74,7 +75,9 @@ class IssueAttachmentEndpoint(BaseAPIView):
                     )
 
                 transaction.on_commit(_dispatch_attachment_created, robust=True)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            # the registrar bringing back documents moves the work item past registration
+            state_advanced = advance_after_registrar_upload(issue_id, request.user, request)
+            return Response({**serializer.data, "state_advanced": state_advanced}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @allow_permission([ROLE.ADMIN], creator=True, model=FileAsset)
@@ -257,6 +260,7 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
             pk=pk, workspace__slug=slug, project_id=project_id, issue_id=issue_id
         )
         serializer = IssueAttachmentSerializer(issue_attachment)
+        state_advanced = False
 
         # Send this activity only if the attachment is not uploaded before
         if not issue_attachment.is_uploaded:
@@ -292,8 +296,11 @@ class IssueAttachmentV2Endpoint(BaseAPIView):
 
                 transaction.on_commit(_dispatch_attachment_created, robust=True)
 
+            # the registrar bringing back documents moves the work item past registration
+            state_advanced = advance_after_registrar_upload(issue_id, request.user, request)
+
         # Get the storage metadata
         if not issue_attachment.storage_metadata:
             get_asset_object_metadata.delay(str(issue_attachment.id))
         issue_attachment.save()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({"state_advanced": state_advanced}, status=status.HTTP_200_OK)

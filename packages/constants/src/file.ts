@@ -20,6 +20,26 @@ export const ACCEPTED_COVER_IMAGE_MIME_TYPES_FOR_REACT_DROPZONE = {
 };
 
 /**
+ * Document extensions that can be attached inside comments (images are handled by the image extension).
+ * Keep in sync with COMMENT_ATTACHMENT_EXTENSION_MIME_TYPES in the API settings.
+ */
+export const ACCEPTED_COMMENT_ATTACHMENT_EXTENSIONS = [
+  "pdf",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+  "odt",
+  "ods",
+  "odp",
+  "rtf",
+  "txt",
+  "csv",
+];
+
+/**
  * Dangerous file extensions that should be blocked
  */
 export const DANGEROUS_EXTENSIONS = [

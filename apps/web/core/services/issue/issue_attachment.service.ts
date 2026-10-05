@@ -30,7 +30,7 @@ export class IssueAttachmentService extends APIService {
     projectId: string,
     issueId: string,
     attachmentId: string
-  ): Promise<void> {
+  ): Promise<{ state_advanced?: boolean } | undefined> {
     return this.patch(
       `/api/assets/v2/workspaces/${workspaceSlug}/projects/${projectId}/${this.serviceType}/${issueId}/attachments/${attachmentId}/`
     )
@@ -60,8 +60,13 @@ export class IssueAttachmentService extends APIService {
           fileUploadPayload,
           uploadProgressHandler
         );
-        await this.updateIssueAttachmentUploadStatus(workspaceSlug, projectId, issueId, signedURLResponse.asset_id);
-        return signedURLResponse.attachment;
+        const uploadStatus = await this.updateIssueAttachmentUploadStatus(
+          workspaceSlug,
+          projectId,
+          issueId,
+          signedURLResponse.asset_id
+        );
+        return { ...signedURLResponse.attachment, state_advanced: uploadStatus?.state_advanced };
       })
       .catch((error) => {
         throw error?.response?.data;
