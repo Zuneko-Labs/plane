@@ -4,21 +4,25 @@
  * See the LICENSE file for details.
  */
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import { v4 as uuidv4 } from "uuid";
 // plane constants
+import { ACCEPTED_COMMENT_ATTACHMENT_EXTENSIONS } from "@plane/constants";
 import type { EIssueCommentAccessSpecifier } from "@plane/constants";
 // plane imports
 import { LiteTextEditorWithRef } from "@plane/editor";
 import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@plane/editor";
 import { useTranslation } from "@plane/i18n";
+import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import type { MakeOptional } from "@plane/types";
-import { cn, isCommentEmpty } from "@plane/utils";
+import { cn, convertBytesToSize, getEditorAssetDownloadSrc, isCommentEmpty } from "@plane/utils";
 // components
 import { EditorMentionsRoot } from "@/components/editor/embeds/mentions";
 import { IssueCommentToolbar } from "@/components/editor/lite-text/toolbar";
 // hooks
 import { useEditorConfig, useEditorMention } from "@/hooks/editor";
 import { useMember } from "@/hooks/store/use-member";
+import { useFileSize } from "@/hooks/use-file-size";
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
 // plane web hooks
 import { useEditorFlagging } from "@/hooks/use-editor-flagging";
@@ -26,6 +30,13 @@ import { useEditorFlagging } from "@/hooks/use-editor-flagging";
 import { WorkspaceService } from "@/services/workspace.service";
 import { LiteToolbar } from "./lite-toolbar";
 const workspaceService = new WorkspaceService();
+
+const escapeHTML = (value: string) =>
+  value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+function isMutableRefObject<T>(forwardedRef: React.ForwardedRef<T>): forwardedRef is React.MutableRefObject<T | null> {
+  return !!forwardedRef && typeof forwardedRef === "object" && "current" in forwardedRef;
+}
 
 type LiteTextEditorWrapperProps = MakeOptional<
   Omit<ILiteTextEditorProps, "fileHandler" | "mentionHandler" | "extendedEditorProps">,
@@ -88,6 +99,9 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
   const isFullVariant = variant === "full";
   const [isFocused, setIsFocused] = useState(isFullVariant ? showToolbarInitially : true);
   const [editorRef, setEditorRef] = useState<EditorRefApi | null>(null);
+  const [isAttachingFile, setIsAttachingFile] = useState(false);
+  // refs
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   // editor flaggings
   const { liteText: liteTextEditorExtensions } = useEditorFlagging({
     workspaceSlug,
@@ -111,11 +125,48 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
   });
   // editor config
   const { getEditorFileHandlers } = useEditorConfig();
-  function isMutableRefObject<T>(ref: React.ForwardedRef<T>): ref is React.MutableRefObject<T | null> {
-    return !!ref && typeof ref === "object" && "current" in ref;
-  }
+  const { maxFileSize } = useFileSize();
   // derived values
   const isEmpty = isCommentEmpty(props.initialValue);
+
+  const handleAttachFile = async (file: File) => {
+    if (!props.editable || !editorRef) return;
+    const extension = file.name.includes(".") ? (file.name.split(".").pop()?.toLowerCase() ?? "") : "";
+    if (!ACCEPTED_COMMENT_ATTACHMENT_EXTENSIONS.includes(extension)) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("common.error.label"),
+        message: `Unsupported file type. Allowed: ${ACCEPTED_COMMENT_ATTACHMENT_EXTENSIONS.join(", ")}.`,
+      });
+      return;
+    }
+    if (file.size > maxFileSize) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("common.error.label"),
+        message: `File must be ${maxFileSize / 1024 / 1024}MB or less in size.`,
+      });
+      return;
+    }
+    setIsAttachingFile(true);
+    try {
+      const assetId = await props.uploadFile(uuidv4(), file);
+      const src = getEditorAssetDownloadSrc({ assetId, projectId, workspaceSlug });
+      if (!src) throw new Error("Missing asset source");
+      editorRef.setEditorValueAtCursorPosition(
+        `<p><a href="${escapeHTML(`${src}?ext=${extension}`)}" target="_blank" rel="noopener noreferrer nofollow">${escapeHTML(file.name)}</a> <span data-text-color="gray">· ${convertBytesToSize(file.size)}</span></p><p></p>`
+      );
+    } catch (error) {
+      console.error("Error in attaching file to comment:", error);
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("common.error.label"),
+        message: error instanceof Error ? error.message : "File upload failed. Please try again.",
+      });
+    } finally {
+      setIsAttachingFile(false);
+    }
+  };
 
   return (
     <div
@@ -217,6 +268,19 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
             editorRef={editorRef}
             showSubmitButton={showSubmitButton}
             submitButtonText={submitButtonText}
+            onAttachFile={() => attachmentInputRef.current?.click()}
+            isAttachingFile={isAttachingFile}
+          />
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            className="hidden"
+            accept={ACCEPTED_COMMENT_ATTACHMENT_EXTENSIONS.map((ext) => `.${ext}`).join(",")}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (file) void handleAttachFile(file);
+            }}
           />
         </div>
       )}

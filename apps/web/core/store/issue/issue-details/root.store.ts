@@ -76,6 +76,8 @@ export interface IIssueDetail
     IIssueActivityStoreActions,
     IIssueCommentStoreActions,
     IIssueCommentReactionStoreActions {
+  // the backend moved the work item to another state as a side effect (e.g. the registrar uploading documents)
+  refreshAfterStateAdvance: (workspaceSlug: string, projectId: string, issueId: string) => void;
   // observables
   peekIssue: TPeekIssue | undefined;
   relationKey: TIssueRelationTypes | null;
@@ -259,8 +261,8 @@ export abstract class IssueDetail implements IIssueDetail {
     this.openWidgets = state;
     if (this.lastWidgetAction) this.lastWidgetAction = null;
   };
-  setLastWidgetAction = (action: TWorkItemWidgets) => {
-    this.openWidgets = [action];
+  setLastWidgetAction = (widget: TWorkItemWidgets) => {
+    this.openWidgets = [widget];
   };
   toggleOpenWidget = (state: TWorkItemWidgets) => {
     if (this.openWidgets && this.openWidgets.includes(state))
@@ -272,6 +274,13 @@ export abstract class IssueDetail implements IIssueDetail {
   // issue
   fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string) =>
     this.issue.fetchIssue(workspaceSlug, projectId, issueId);
+  refreshAfterStateAdvance = (workspaceSlug: string, projectId: string, issueId: string) => {
+    void this.issue.fetchIssue(workspaceSlug, projectId, issueId).catch((error) => console.error(error));
+    // the state-change activity is written by a background task, so pick it up a little later
+    setTimeout(() => {
+      void this.activity.fetchActivities(workspaceSlug, projectId, issueId).catch((error) => console.error(error));
+    }, 2500);
+  };
   fetchIssueWithIdentifier = async (workspaceSlug: string, projectIdentifier: string, sequenceId: string) =>
     this.issue.fetchIssueWithIdentifier(workspaceSlug, projectIdentifier, sequenceId);
   updateIssue = async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) =>

@@ -45,6 +45,8 @@ export type TIssueComment = {
   external_id: string | undefined;
   external_source: string | undefined;
   access: EIssueCommentAccessSpecifier;
+  // set when the comment's files moved the work item past the registration state
+  state_advanced?: boolean;
 };
 
 export type TCommentsOperations = {

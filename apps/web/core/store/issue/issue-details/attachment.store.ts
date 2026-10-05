@@ -171,6 +171,8 @@ export class IssueAttachmentStore implements IIssueAttachmentStore {
             attachment_count: this.getAttachmentsCountByIssueId(issueId),
           });
         });
+        if (response.state_advanced)
+          this.rootIssueDetailStore.refreshAfterStateAdvance(workspaceSlug, projectId, issueId);
       }
 
       return response;

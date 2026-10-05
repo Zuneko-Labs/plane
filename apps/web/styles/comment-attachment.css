@@ -1,0 +1,53 @@
+/* Comment document attachments: download links to editor assets render like the
+   work item Attachments list (file icon + name). The `ext` query param is added on
+   upload and only picks the icon. */
+.ProseMirror a[href*="/api/assets/v2/workspaces/"][href*="/download/"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 0;
+  color: var(--text-color-primary) !important;
+  font-weight: 500;
+  text-decoration: none !important;
+  vertical-align: middle;
+  word-break: break-all;
+}
+
+.ProseMirror a[href*="/api/assets/v2/workspaces/"][href*="/download/"]:hover {
+  text-decoration: underline !important;
+  text-underline-offset: 3px;
+}
+
+.ProseMirror a[href*="/api/assets/v2/workspaces/"][href*="/download/"]::before {
+  content: "";
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  background: url("../app/assets/attachment/default-icon.png") center / contain no-repeat;
+}
+
+.ProseMirror a[href*="/download/"][href$="ext=pdf"]::before {
+  background-image: url("../app/assets/attachment/pdf-icon.png");
+}
+
+.ProseMirror a[href*="/download/"][href$="ext=doc"]::before,
+.ProseMirror a[href*="/download/"][href$="ext=docx"]::before,
+.ProseMirror a[href*="/download/"][href$="ext=odt"]::before,
+.ProseMirror a[href*="/download/"][href$="ext=rtf"]::before {
+  background-image: url("../app/assets/attachment/doc-icon.png");
+}
+
+.ProseMirror a[href*="/download/"][href$="ext=xls"]::before,
+.ProseMirror a[href*="/download/"][href$="ext=xlsx"]::before,
+.ProseMirror a[href*="/download/"][href$="ext=ods"]::before {
+  background-image: url("../app/assets/attachment/excel-icon.png");
+}
+
+.ProseMirror a[href*="/download/"][href$="ext=csv"]::before {
+  background-image: url("../app/assets/attachment/csv-icon.png");
+}
+
+.ProseMirror a[href*="/download/"][href$="ext=txt"]::before {
+  background-image: url("../app/assets/attachment/txt-icon.png");
+}

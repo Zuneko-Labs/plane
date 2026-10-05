@@ -6,6 +6,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import type { LucideIcon } from "lucide-react";
+import { Loader, Paperclip } from "lucide-react";
 
 import { EIssueCommentAccessSpecifier } from "@plane/constants";
 // editor
@@ -34,6 +35,8 @@ type Props = {
   showSubmitButton: boolean;
   editorRef: EditorRefApi | null;
   submitButtonText?: string;
+  onAttachFile?: () => void;
+  isAttachingFile?: boolean;
 };
 
 type TCommentAccessType = {
@@ -70,6 +73,8 @@ export function IssueCommentToolbar(props: Props) {
     showSubmitButton,
     editorRef,
     submitButtonText = "common.comment",
+    onAttachFile,
+    isAttachingFile = false,
   } = props;
   // State to manage active states of toolbar items
   const [activeStates, setActiveStates] = useState<Record<string, boolean>>({});
@@ -100,7 +105,7 @@ export function IssueCommentToolbar(props: Props) {
   }, [editorRef, updateActiveStates]);
 
   const isEditorReadyToDiscard = editorRef?.isEditorReadyToDiscard();
-  const isSubmitButtonDisabled = isCommentEmpty || !isEditorReadyToDiscard;
+  const isSubmitButtonDisabled = isCommentEmpty || !isEditorReadyToDiscard || isAttachingFile;
 
   return (
     <div className="flex h-9 w-full items-stretch gap-1.5 overflow-x-scroll bg-surface-2">
@@ -174,6 +179,31 @@ export function IssueCommentToolbar(props: Props) {
               })}
             </div>
           ))}
+          {onAttachFile && (
+            <div className="flex items-stretch gap-0.5 px-2.5">
+              <Tooltip
+                tooltipContent={
+                  <p className="flex flex-col gap-1 text-center text-11">
+                    <span className="font-medium">Attach file</span>
+                    <span className="text-placeholder">PDF, Word, Excel, PowerPoint, text</span>
+                  </p>
+                }
+              >
+                <button
+                  type="button"
+                  onClick={onAttachFile}
+                  disabled={isAttachingFile}
+                  className="grid aspect-square place-items-center rounded-xs p-0.5 text-placeholder hover:bg-layer-1 disabled:cursor-not-allowed"
+                >
+                  {isAttachingFile ? (
+                    <Loader className="h-3.5 w-3.5 animate-spin" strokeWidth={2.5} />
+                  ) : (
+                    <Paperclip className="h-3.5 w-3.5" strokeWidth={2.5} />
+                  )}
+                </button>
+              </Tooltip>
+            </div>
+          )}
         </div>
         {showSubmitButton && (
           <div className="sticky right-1">

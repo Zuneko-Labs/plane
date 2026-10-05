@@ -553,6 +553,31 @@ ATTACHMENT_MIME_TYPES = [
     "text/markdown",
 ]
 
+# Document attachments allowed inside comment descriptions, keyed by extension.
+# The client sends a signature-detected MIME type, which is empty for plain-text
+# formats and "application/x-cfb" / "application/zip" for legacy/OOXML office files,
+# so the extension decides the stored type.
+COMMENT_ATTACHMENT_EXTENSION_MIME_TYPES = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "odt": "application/vnd.oasis.opendocument.text",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    "odp": "application/vnd.oasis.opendocument.presentation",
+    "rtf": "application/rtf",
+    "txt": "text/plain",
+    "csv": "text/csv",
+}
+
+# Signature-detected types that are too generic to contradict the extension.
+COMMENT_ATTACHMENT_GENERIC_MIME_TYPES = frozenset(
+    ["", "application/octet-stream", "application/x-cfb", "application/zip", "text/plain"]
+)
+
 # MIME types that browsers can execute as scripts when served inline.
 # These must always be served with Content-Disposition: attachment, even if they
 # somehow end up stored (e.g. uploaded before this restriction was added).
