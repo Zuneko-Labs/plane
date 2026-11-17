@@ -10,7 +10,6 @@ import { observer } from "mobx-react";
 import { useParams, usePathname } from "next/navigation";
 import { cn, calculateTimeAgo } from "@plane/utils";
 import { TopNavPowerK } from "@/components/navigation";
-import { HelpMenuRoot } from "@/components/workspace/sidebar/help-section/root";
 import { UserMenuRoot } from "@/components/workspace/sidebar/user-menu-root";
 import { WorkspaceMenuRoot } from "@/components/workspace/sidebar/workspace-menu-root";
 import { useAppRailPreferences } from "@/hooks/use-navigation-preferences";
@@ -175,7 +174,6 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
             </div>
           )}
         </div>
-        <HelpMenuRoot />
         <div className="flex size-8 items-center justify-center rounded-md hover:bg-layer-1-hover">
           <UserMenuRoot />
         </div>

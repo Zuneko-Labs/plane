@@ -4,11 +4,11 @@
  * See the LICENSE file for details.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Search, Trash2 } from "lucide-react";
 // plane imports
 import { Button } from "@plane/propel/button";
 import { TOAST_TYPE, setToast } from "@plane/propel/toast";
@@ -28,11 +28,22 @@ export const TemplatesList = observer(function TemplatesList() {
   const [templateToUpdate, setTemplateToUpdate] = useState<TComplianceTemplate | undefined>(undefined);
   const [templateToDelete, setTemplateToDelete] = useState<TComplianceTemplate | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [search, setSearch] = useState("");
 
   useSWR(
     workspaceSlug ? `COMPLIANCE_TEMPLATES_${workspaceSlug}` : null,
     workspaceSlug ? () => fetchCategoriesAndTemplates(workspaceSlug.toString()) : null
   );
+
+  const filteredTemplates = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return templates;
+    return templates.filter(
+      (template) =>
+        template.title.toLowerCase().includes(query) ||
+        (template.category_detail?.name ?? "").toLowerCase().includes(query)
+    );
+  }, [templates, search]);
 
   const handleToggleActive = async (template: TComplianceTemplate) => {
     if (!workspaceSlug) return;
@@ -73,19 +84,32 @@ export const TemplatesList = observer(function TemplatesList() {
             Click a template to edit its due date, naming pattern, frequency — or add your own.
           </p>
         </div>
-        <Button
-          variant="primary"
-          onClick={() => {
-            setTemplateToUpdate(undefined);
-            setIsModalOpen(true);
-          }}
-        >
-          + New template
-        </Button>
+        <div className="flex items-center gap-2">
+          <label className="flex w-56 items-center gap-2 rounded-md border border-subtle bg-layer-1 px-2.5 py-1.5">
+            <Search className="size-3.5 shrink-0 text-tertiary" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search templates"
+              aria-label="Search templates"
+              className="w-full bg-transparent text-13 text-primary outline-none placeholder:text-placeholder"
+            />
+          </label>
+          <Button
+            variant="primary"
+            onClick={() => {
+              setTemplateToUpdate(undefined);
+              setIsModalOpen(true);
+            }}
+          >
+            + New template
+          </Button>
+        </div>
       </div>
 
       <Table<TComplianceTemplate>
-        data={templates}
+        data={filteredTemplates}
         keyExtractor={(template) => template.id}
         tdClassName="text-center"
         columns={[
