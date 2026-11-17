@@ -90,9 +90,7 @@ def generate_compliance_issues(as_of=None, workspace_slug=None):
 
     created, skipped, failed = [], [], []
 
-    templates = ComplianceTemplate.objects.filter(is_active=True).select_related("category").prefetch_related(
-        "applicable_projects"
-    )
+    templates = ComplianceTemplate.objects.filter(is_active=True).select_related("category")
     if workspace_slug:
         # The daily Celery Beat run covers every workspace; the "Generate
         # now" admin endpoint must only fan out within the calling
@@ -104,7 +102,7 @@ def generate_compliance_issues(as_of=None, workspace_slug=None):
         if generated is None:
             continue
 
-        for project in template.applicable_projects.filter(archived_at__isnull=True):
+        for project in template.get_applicable_projects().filter(archived_at__isnull=True):
             try:
                 with transaction.atomic():
                     run = ComplianceRun.objects.create(

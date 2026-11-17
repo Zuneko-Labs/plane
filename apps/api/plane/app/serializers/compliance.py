@@ -32,10 +32,9 @@ class ComplianceTemplateSerializer(BaseSerializer):
     # `.set()`-based M2M save — Django itself forbids `.set()`/`.add()` on
     # such fields. Applicability is mutated exclusively through
     # ComplianceApplicabilityToggleEndpoint, which creates/soft-deletes the
-    # through-model rows directly.
-    applicable_project_ids = serializers.PrimaryKeyRelatedField(
-        source="applicable_projects", many=True, read_only=True
-    )
+    # through-model rows directly. Read via get_applicable_projects() (not
+    # the raw M2M) so soft-deleted, i.e. unticked, rows are excluded.
+    applicable_project_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = ComplianceTemplate
@@ -64,6 +63,14 @@ class ComplianceTemplateSerializer(BaseSerializer):
         workspace_id = self.context.get("workspace_id")
         if workspace_id:
             self.fields["category"].queryset = ComplianceCategory.objects.filter(workspace_id=workspace_id)
+
+    def get_applicable_project_ids(self, obj):
+        # The list endpoint prefetches these (see ComplianceTemplateEndpoint)
+        # to avoid one query per template; fall back to a query otherwise.
+        prefetched = getattr(obj, "active_applicabilities", None)
+        if prefetched is not None:
+            return [str(applicability.project_id) for applicability in prefetched]
+        return [str(project_id) for project_id in obj.get_applicable_projects().values_list("id", flat=True)]
 
     def validate_key(self, value):
         workspace_id = self.context.get("workspace_id")

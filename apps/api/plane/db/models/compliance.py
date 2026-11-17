@@ -98,6 +98,22 @@ class ComplianceTemplate(WorkspaceBaseModel):
     def __str__(self):
         return str(self.title)
 
+    def get_applicable_projects(self):
+        """Projects this template currently applies to.
+
+        Use this instead of ``applicable_projects``: unticking a cell
+        soft-deletes the ``ComplianceApplicability`` row, and Django's M2M
+        join does not apply the through model's soft-delete filter, so
+        ``applicable_projects`` still returns unticked projects. Both
+        conditions sit in one ``filter()`` call so they hit the same join row.
+        """
+        from .project import Project
+
+        return Project.objects.filter(
+            project_complianceapplicability__template=self,
+            project_complianceapplicability__deleted_at__isnull=True,
+        ).distinct()
+
 
 class ComplianceApplicability(WorkspaceBaseModel):
     """Through-model backing ``ComplianceTemplate.applicable_projects``.

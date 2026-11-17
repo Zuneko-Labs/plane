@@ -187,6 +187,33 @@ class TestGenerateComplianceIssues:
 
         assert Issue.objects.filter(project=other_project).count() == 0
 
+    def test_unticked_project_is_excluded(self):
+        """Unticking a cell soft-deletes the applicability row. The raw M2M
+        join ignores soft-deletes, so this guards against regressing to it."""
+        from plane.app.serializers import ComplianceTemplateSerializer
+
+        project = ProjectFactory()
+        template = _make_template(project)
+        ComplianceApplicability.objects.filter(project=project, template=template).delete()
+
+        generate_compliance_issues(as_of=date(2026, 8, 20))
+
+        assert Issue.objects.filter(project=project).count() == 0
+        assert ComplianceTemplateSerializer(template).data["applicable_project_ids"] == []
+
+    def test_retick_after_untick_applies_again(self):
+        from plane.app.serializers import ComplianceTemplateSerializer
+
+        project = ProjectFactory()
+        template = _make_template(project)
+        ComplianceApplicability.objects.filter(project=project, template=template).delete()
+        ComplianceApplicability.objects.create(project=project, template=template, workspace_id=project.workspace_id)
+
+        generate_compliance_issues(as_of=date(2026, 8, 20))
+
+        assert Issue.objects.filter(project=project).count() == 1
+        assert ComplianceTemplateSerializer(template).data["applicable_project_ids"] == [str(project.id)]
+
     def test_archived_project_is_excluded(self):
         from django.utils import timezone
 

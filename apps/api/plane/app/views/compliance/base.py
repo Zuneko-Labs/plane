@@ -7,7 +7,7 @@ from datetime import datetime
 
 # Django imports
 from django.db import IntegrityError
-from django.utils import timezone
+from django.db.models import Prefetch
 
 # Third party imports
 from rest_framework import status
@@ -74,7 +74,20 @@ class ComplianceTemplateEndpoint(BaseAPIView):
     @allow_permission(allowed_roles=[ROLE.ADMIN], level="WORKSPACE")
     def get(self, request, slug, pk=None):
         if pk is None:
-            templates = ComplianceTemplate.objects.filter(workspace__slug=slug).select_related("category")
+            templates = (
+                ComplianceTemplate.objects.filter(workspace__slug=slug)
+                .select_related("category")
+                .prefetch_related(
+                    Prefetch(
+                        "applicabilities",
+                        # Default manager already drops soft-deleted (unticked) rows;
+                        # also drop rows whose project was deleted, matching
+                        # ComplianceTemplate.get_applicable_projects().
+                        queryset=ComplianceApplicability.objects.filter(project__deleted_at__isnull=True),
+                        to_attr="active_applicabilities",
+                    )
+                )
+            )
             serializer = ComplianceTemplateSerializer(templates, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         template = ComplianceTemplate.objects.select_related("category").get(workspace__slug=slug, pk=pk)
