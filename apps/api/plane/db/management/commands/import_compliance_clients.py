@@ -96,6 +96,13 @@ def sanitize_project_name(name):
     return re.sub(r"\s+", " ", name).strip()
 
 
+def format_project_name(name):
+    """Name for a newly created project: sanitized, then sentence case
+    (first letter capital, everything else lowercase), e.g.
+    "GHEZEP LOGISTIC PVT LTD" -> "Ghezep logistic pvt ltd"."""
+    return sanitize_project_name(name).capitalize()
+
+
 class Command(BaseCommand):
     help = "Import a client x compliance-service matrix (xlsx/csv) into Compliance templates & applicability."
 
@@ -239,7 +246,7 @@ class Command(BaseCommand):
         return candidate
 
     def create_project(self, workspace, client_name, actor, used_identifiers):
-        name = sanitize_project_name(client_name)
+        name = format_project_name(client_name)
         identifier = self.unique_identifier(workspace, name, used_identifiers)
         serializer = ProjectSerializer(
             data={"name": name, "identifier": identifier}, context={"workspace_id": workspace.id}
