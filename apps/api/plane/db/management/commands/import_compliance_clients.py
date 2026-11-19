@@ -97,10 +97,10 @@ def sanitize_project_name(name):
 
 
 def format_project_name(name):
-    """Name for a newly created project: sanitized, then sentence case
-    (first letter capital, everything else lowercase), e.g.
-    "GHEZEP LOGISTIC PVT LTD" -> "Ghezep logistic pvt ltd"."""
-    return sanitize_project_name(name).capitalize()
+    """Name for a newly created project: sanitized, then the first letter of
+    each word capital and the rest lowercase, e.g.
+    "GHEZEP LOGISTIC PVT LTD" -> "Ghezep Logistic Pvt Ltd"."""
+    return " ".join(word.capitalize() for word in sanitize_project_name(name).split(" "))
 
 
 class Command(BaseCommand):
