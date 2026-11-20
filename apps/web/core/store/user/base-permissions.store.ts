@@ -56,6 +56,7 @@ export interface IBaseUserPermissionStore {
   fetchUserProjectInfo: (workspaceSlug: string, projectId: string) => Promise<TProjectMembership>;
   fetchUserProjectPermissions: (workspaceSlug: string) => Promise<IUserProjectsRole>;
   joinProject: (workspaceSlug: string, projectId: string) => Promise<void>;
+  joinProjects: (workspaceSlug: string, projectIds: string[]) => Promise<void>;
   leaveProject: (workspaceSlug: string, projectId: string) => Promise<void>;
   hasPageAccess: (workspaceSlug: string, key: string) => boolean;
 }
@@ -86,6 +87,7 @@ export abstract class BaseUserPermissionStore implements IBaseUserPermissionStor
       fetchUserProjectInfo: action,
       fetchUserProjectPermissions: action,
       joinProject: action,
+      joinProjects: action,
       leaveProject: action,
     });
   }
@@ -329,6 +331,33 @@ export abstract class BaseUserPermissionStore implements IBaseUserPermissionStor
       }
     } catch (error) {
       console.error("Error user joining the project", error);
+      throw error;
+    }
+  };
+
+  /**
+   * @description Joins several projects in one request
+   * @param { string } workspaceSlug
+   * @param { string[] } projectIds
+   * @returns { Promise<void> }
+   */
+  joinProjects = async (workspaceSlug: string, projectIds: string[]): Promise<void> => {
+    if (projectIds.length === 0) return;
+    try {
+      const response = await userService.joinProject(workspaceSlug, projectIds);
+      const projectMemberRole = this.getWorkspaceRoleByWorkspaceSlug(workspaceSlug) ?? EUserPermissions.MEMBER;
+      if (response) {
+        runInAction(() => {
+          projectIds.forEach((projectId) => {
+            set(this.workspaceProjectsPermissions, [workspaceSlug, projectId], projectMemberRole);
+          });
+        });
+        projectIds.forEach((projectId) => {
+          void this.fetchWorkspaceLevelProjectEntities(workspaceSlug, projectId);
+        });
+      }
+    } catch (error) {
+      console.error("Error user joining the projects", error);
       throw error;
     }
   };

@@ -12,6 +12,8 @@ import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, TIssue } from
 // components
 import { SpreadsheetIssueRowLoader } from "@/components/ui/loader/layouts/spreadsheet-layout-loader";
 // hooks
+import { shouldRenderColumn } from "@/helpers/issue-filter.helper";
+import { useColumnWidths } from "@/hooks/use-column-widths";
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useIssuesStore } from "@/hooks/use-issue-layout-store";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
@@ -61,6 +63,10 @@ export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props)
     isWorkspaceLevel = false,
   } = props;
 
+  // column widths (Excel-like resize), exposed to cells via CSS variables
+  const { cssVars, startResize, resetWidth } = useColumnWidths(
+    `spreadsheet_col_widths_${isWorkspaceLevel ? "workspace" : "project"}`
+  );
   // states
   const isScrolled = useRef(false);
   const [intersectionElement, setIntersectionElement] = useState<HTMLTableSectionElement | null>(null);
@@ -112,9 +118,24 @@ export const SpreadsheetTable = observer(function SpreadsheetTable(props: Props)
   if (!isEstimateEnabled) ignoreFieldsForCounting.push("estimate");
   const displayPropertiesCount = getDisplayPropertiesCount(displayProperties, ignoreFieldsForCounting);
 
+  // fixed table layout needs an explicit total width: sum of every rendered column's CSS variable
+  const tableWidth = `calc(${[
+    ...(isWorkspaceLevel ? ["var(--col-project, 144px)"] : []),
+    `var(--col-name, ${isWorkspaceLevel ? 360 : 320}px)`,
+    ...spreadsheetColumnsList
+      .filter((property) => displayProperties[property] && shouldRenderColumn(property))
+      .map((property) => `var(--col-${property}, 144px)`),
+  ].join(" + ")})`;
+
   return (
-    <table className="w-full overflow-y-auto bg-surface-1" onKeyDown={handleKeyBoardNavigation}>
+    <table
+      className="overflow-y-auto bg-surface-1"
+      style={{ ...cssVars, tableLayout: "fixed", width: tableWidth, minWidth: "100%" }}
+      onKeyDown={handleKeyBoardNavigation}
+    >
       <SpreadsheetHeader
+        startResize={startResize}
+        resetWidth={resetWidth}
         displayProperties={displayProperties}
         displayFilters={displayFilters}
         handleDisplayFilterUpdate={handleDisplayFilterUpdate}
