@@ -6,10 +6,11 @@
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import { addDays, format, parseISO } from "date-fns";
+import { sortBy } from "lodash-es";
 import { ChevronDown, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { CheckIcon } from "@plane/propel/icons";
 import { observer } from "mobx-react";
-import { useParams } from "next/navigation";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import useSWR from "swr";
 // plane imports
 import { EUserPermissions, EUserPermissionsLevel } from "@plane/constants";
@@ -118,7 +119,22 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
   const { allowPermissions } = useUserPermissions();
   const [weekAnchor, setWeekAnchor] = useState(() => new Date());
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
-  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const memberParam = searchParams.get("member");
+  const [selectedMembers, setSelectedMembers] = useState<string[]>(() => (memberParam ? [memberParam] : []));
+
+  // keep the member filter in sync when arriving via a link (e.g. analytics -> team calendar)
+  useEffect(() => {
+    if (memberParam) setSelectedMembers([memberParam]);
+  }, [memberParam]);
+
+  const handleMembersChange = (members: string[]) => {
+    setSelectedMembers(members);
+    // drop the deep-link param so it doesn't re-apply the filter
+    if (memberParam) router.replace(pathname);
+  };
   const [selectedStates, setSelectedStates] = useState<string[]>([]);
 
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
@@ -149,7 +165,7 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
         }
       }
     }
-    return Array.from(stateMap.values()).toSorted((a, b) => a.name.localeCompare(b.name));
+    return sortBy(Array.from(stateMap.values()), (state) => state.name.toLowerCase());
   }, [data]);
 
   const visibleMembers = useMemo(() => {
@@ -225,7 +241,7 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
             <MemberDropdown
               multiple
               value={selectedMembers}
-              onChange={(val) => setSelectedMembers(val)}
+              onChange={(val) => handleMembersChange(val)}
               buttonVariant="border-with-text"
               placeholder="All members"
             />
@@ -233,7 +249,7 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
               <button
                 type="button"
                 className="grid size-5 place-items-center rounded-sm text-tertiary hover:bg-layer-transparent-hover hover:text-secondary"
-                onClick={() => setSelectedMembers([])}
+                onClick={() => handleMembersChange([])}
                 aria-label="Clear member filter"
               >
                 <X className="size-3" />

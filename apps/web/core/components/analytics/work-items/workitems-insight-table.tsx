@@ -7,12 +7,12 @@
 import { useMemo } from "react";
 import type { ColumnDef, Row, RowData } from "@tanstack/react-table";
 import { observer } from "mobx-react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
 import { UserRound } from "lucide-react";
+import { EUserPermissions, EUserPermissionsLevel } from "@plane/constants";
 import { useTranslation } from "@plane/i18n";
-import { Logo } from "@plane/propel/emoji-icon-picker";
-import { ProjectIcon } from "@plane/propel/icons";
 // plane package imports
 import type { AnalyticsTableDataMap, WorkItemInsightColumns } from "@plane/types";
 // plane web components
@@ -20,7 +20,7 @@ import { Avatar } from "@plane/ui";
 import { getFileURL } from "@plane/utils";
 // hooks
 import { useAnalytics } from "@/hooks/store/use-analytics";
-import { useProject } from "@/hooks/store/use-project";
+import { useUserPermissions } from "@/hooks/store/user";
 import { AnalyticsService } from "@/services/analytics.service";
 // plane web components
 import { exportCSV } from "../export";
@@ -45,7 +45,8 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
   const workspaceSlug = params.workspaceSlug.toString();
   const { t } = useTranslation();
   // store hooks
-  const { getProjectById } = useProject();
+  const { allowPermissions } = useUserPermissions();
+  const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, workspaceSlug);
   const { selectedDuration, selectedProjects, selectedCycle, selectedModule, isPeekView, isEpic } = useAnalytics();
   const { data: workItemsData, isLoading } = useSWR(
     `insights-table-work-items-${workspaceSlug}-${selectedDuration}-${selectedProjects}-${selectedCycle}-${selectedModule}-${isPeekView}-${isEpic}`,
@@ -79,63 +80,47 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
     );
   const columns: ColumnDef<AnalyticsTableDataMap["work-items"]>[] = useMemo(
     () => [
-      !isPeekView
-        ? {
-            accessorKey: "project__name",
-            header: () => <div className="text-left">{columnsLabels["project__name"]}</div>,
-            cell: ({ row }) => {
-              const project = getProjectById(row.original.project_id);
-              return (
-                <div className="flex items-center gap-2">
-                  {project?.logo_props ? (
-                    <Logo logo={project.logo_props} size={18} />
-                  ) : (
-                    <ProjectIcon className="h-4 w-4" />
-                  )}
-                  {project?.name}
+      {
+        accessorKey: "display_name",
+        header: () => <div className="text-left">{columnsLabels["display_name"]}</div>,
+        cell: ({ row }: { row: Row<WorkItemInsightColumns> }) => {
+          const { assignee_id, avatar_url, display_name } = row.original;
+          // member rows of the workspace-level table open the team calendar (admin only) filtered to that member
+          const isClickable = !isPeekView && isAdmin && !!assignee_id;
+          const content = (
+            <div className="flex items-center gap-2">
+              {avatar_url && avatar_url !== "" ? (
+                <Avatar name={display_name} src={getFileURL(avatar_url)} size={24} shape="circle" />
+              ) : (
+                <div className="flex h-4 w-4 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-layer-1 capitalize">
+                  {display_name ? display_name?.[0] : <UserRound className="text-secondary" size={12} />}
                 </div>
-              );
-            },
-            meta: {
-              export: {
-                key: columnsLabels["project__name"],
-                value: (row) => row.original.project__name?.toString() ?? "",
-              },
-            },
-          }
-        : {
-            accessorKey: "display_name",
-            header: () => <div className="text-left">{columnsLabels["display_name"]}</div>,
-            cell: ({ row }: { row: Row<WorkItemInsightColumns> }) => (
-              <div className="text-left">
-                <div className="flex items-center gap-2">
-                  {row.original.avatar_url && row.original.avatar_url !== "" ? (
-                    <Avatar
-                      name={row.original.display_name}
-                      src={getFileURL(row.original.avatar_url)}
-                      size={24}
-                      shape="circle"
-                    />
-                  ) : (
-                    <div className="flex h-4 w-4 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-layer-1 capitalize">
-                      {row.original.display_name ? (
-                        row.original.display_name?.[0]
-                      ) : (
-                        <UserRound className="text-secondary" size={12} />
-                      )}
-                    </div>
-                  )}
-                  <span className="break-words text-secondary">{row.original.display_name ?? t(`Unassigned`)}</span>
-                </div>
-              </div>
-            ),
-            meta: {
-              export: {
-                key: columnsLabels["display_name"],
-                value: (row) => row.original.display_name?.toString() ?? "",
-              },
-            },
+              )}
+              <span className="break-words text-secondary">{display_name ?? t(`Unassigned`)}</span>
+            </div>
+          );
+          return (
+            <div className="text-left">
+              {isClickable ? (
+                <Link
+                  href={`/${workspaceSlug}/team-calendar?member=${assignee_id}`}
+                  className="inline-block hover:underline"
+                >
+                  {content}
+                </Link>
+              ) : (
+                content
+              )}
+            </div>
+          );
+        },
+        meta: {
+          export: {
+            key: columnsLabels["display_name"],
+            value: (row) => row.original.display_name?.toString() ?? "",
           },
+        },
+      },
       {
         accessorKey: "backlog_work_items",
         header: () => <div className="text-right">{columnsLabels["backlog_work_items"]}</div>,
@@ -192,7 +177,7 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
         },
       },
     ],
-    [columnsLabels, getProjectById, isPeekView, t]
+    [columnsLabels, isAdmin, isPeekView, t, workspaceSlug]
   );
   return (
     <InsightTable<"work-items">
@@ -201,7 +186,7 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
       isLoading={isLoading}
       columns={columns}
       columnsLabels={columnsLabels}
-      headerText={isPeekView ? t("common.assignee") : t("common.projects")}
+      headerText={isPeekView ? t("common.assignee") : t("common.members")}
       onExport={(rows) => workItemsData && exportCSV(rows, columns, workspaceSlug)}
     />
   );

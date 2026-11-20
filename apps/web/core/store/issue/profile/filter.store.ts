@@ -141,7 +141,12 @@ export class ProfileIssuesFilter extends IssueFilterHelperStore implements IProf
     const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.PROFILE, workspaceSlug, userId, undefined);
 
     const richFilters: TWorkItemFilterExpression = _filters?.rich_filters;
-    const displayFilters: IIssueDisplayFilterOptions = this.computedDisplayFilters(_filters?.display_filters);
+    const computedFilters: IIssueDisplayFilterOptions = this.computedDisplayFilters(_filters?.display_filters);
+    // "Your work" is grouped by project by default
+    const displayFilters: IIssueDisplayFilterOptions = {
+      ...computedFilters,
+      group_by: computedFilters.group_by ?? "project",
+    };
     const displayProperties: IIssueDisplayProperties = this.computedDisplayProperties(_filters?.display_properties);
     const kanbanFilters = {
       group_by: _filters?.kanban_filters?.group_by || [],
