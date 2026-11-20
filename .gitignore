@@ -127,3 +127,9 @@ backup-plane-db-*.sql
 staging-deploy.sh
 docker-compose.staging.yml
 backup-plane-staging-*.sql
+
+# Local dev tooling (not for version control)
+.codegraph/
+docker-compose-infra.yml
+# Windows: i18n locales symlink gets expanded into a real directory
+packages/i18n/locales/

@@ -28,6 +28,7 @@ import RenderIfVisible from "@/components/core/render-if-visible-HOC";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useProject } from "@/hooks/store/use-project";
+import { getColumnStyle } from "@/hooks/use-column-widths";
 import useIssuePeekOverviewRedirection from "@/hooks/use-issue-peek-overview-redirection";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
 import { usePlatformOS } from "@/hooks/use-platform-os";
@@ -203,7 +204,7 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
   // router
   const { workspaceSlug, projectId } = useParams();
   // hooks
-  const { getProjectIdentifierById } = useProject();
+  const { getProjectIdentifierById, getProjectById } = useProject();
   const { getIsIssuePeeked, peekIssue } = useIssueDetail(isEpic ? EIssueServiceType.EPICS : EIssueServiceType.ISSUES);
   const { handleRedirection } = useIssuePeekOverviewRedirection(isEpic);
   const { isMobile } = usePlatformOS();
@@ -252,6 +253,7 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
   const subIssuesCount = issueDetail?.sub_issues_count ?? 0;
   const isIssueSelected = selectionHelpers.getIsEntitySelected(issueDetail.id);
   const projectIdentifier = getProjectIdentifierById(issueDetail.project_id);
+  const projectName = getProjectById(issueDetail.project_id)?.name;
 
   const canSelectIssues = !disableUserActions && !selectionHelpers.isSelectionDisabled;
 
@@ -267,8 +269,12 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
   return (
     <>
       {isWorkspaceLevel && (
-        <td className="relative left-0 z-10 h-11 min-w-36 border border-t-0 border-b-[0.5px] border-subtle-1 bg-surface-1 px-2 text-13 md:sticky">
-          {projectIdentifier}
+        <td
+          className="relative left-0 z-10 h-11 truncate border border-t-0 border-b-[0.5px] border-subtle-1 bg-surface-1 px-2 text-13 md:sticky"
+          style={getColumnStyle("project", 144)}
+          title={projectName}
+        >
+          {projectName}
         </td>
       )}
       {/* Single sticky column containing both identifier and workitem */}
@@ -276,10 +282,14 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
         id={`issue-${issueId}`}
         ref={cellRef}
         tabIndex={0}
-        className={cn("group/list-block relative max-w-lg bg-surface-1", {
-          "left-36 z-10 md:sticky": isWorkspaceLevel,
+        className={cn("group/list-block relative overflow-hidden bg-surface-1", {
+          "z-10 md:sticky": isWorkspaceLevel,
           "left-0 z-10 md:sticky": !isWorkspaceLevel,
         })}
+        style={{
+          ...getColumnStyle("name", isWorkspaceLevel ? 360 : 320),
+          ...(isWorkspaceLevel ? { left: getColumnStyle("project", 144).width } : {}),
+        }}
       >
         <ControlLink
           href={workItemLink}
@@ -317,12 +327,7 @@ const IssueRowDetails = observer(function IssueRowDetails(props: IssueRowDetails
             )}
 
             {/* Workitem section */}
-            <div
-              className={cn("flex flex-grow items-center gap-0.5 py-2", {
-                "min-w-[360px]": !displayProperties?.key || isWorkspaceLevel,
-                "min-w-60": displayProperties?.key && !isWorkspaceLevel,
-              })}
-            >
+            <div className="flex min-w-0 flex-grow items-center gap-0.5 py-2">
               {/* select checkbox */}
               {projectId && canSelectIssues && (
                 <Tooltip

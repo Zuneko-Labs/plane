@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import type { MouseEvent } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // constants
@@ -14,7 +15,9 @@ import type { IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@plane
 import { cn } from "@plane/utils";
 import { MultipleSelectGroupAction } from "@/components/core/multiple-select";
 // hooks
+import { getColumnStyle } from "@/hooks/use-column-widths";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
+import { ColumnResizeHandle } from "./column-resize-handle";
 import { SpreadsheetHeaderColumn } from "./spreadsheet-header-column";
 
 interface Props {
@@ -27,10 +30,14 @@ interface Props {
   selectionHelpers: TSelectionHelper;
   isEpic?: boolean;
   isWorkspaceLevel?: boolean;
+  startResize: (key: string, event: MouseEvent<HTMLElement>) => void;
+  resetWidth: (key: string) => void;
 }
 
 export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Props) {
   const {
+    startResize,
+    resetWidth,
     displayProperties,
     displayFilters,
     handleDisplayFilterUpdate,
@@ -53,24 +60,33 @@ export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Prop
       <tr>
         {isWorkspaceLevel && (
           <th
-            className="left-0 z-[15] h-11 min-w-36 items-center border border-t-0 border-b-0 border-subtle bg-layer-1 py-1 text-13 font-medium md:sticky"
+            className="left-0 z-[15] h-11 items-center border border-t-0 border-b-0 border-subtle bg-layer-1 py-1 text-13 font-medium md:sticky"
+            style={getColumnStyle("project", 144)}
             tabIndex={-1}
           >
-            <div className="flex h-full w-full items-center px-2">Project</div>
+            <div className="flex h-full w-full items-center truncate px-2">Project</div>
+            <ColumnResizeHandle
+              onResizeStart={(e) => startResize("project", e)}
+              onReset={() => resetWidth("project")}
+            />
           </th>
         )}
 
         {/* Single header column containing both identifier and workitem */}
         <th
           className={cn(
-            "group/list-header z-[15] h-11 min-w-60 border-r-[0.5px] border-subtle bg-layer-1 text-13 font-medium md:sticky",
-            { "left-36": isWorkspaceLevel, "left-0": !isWorkspaceLevel }
+            "group/list-header relative z-[15] h-11 border-r-[0.5px] border-subtle bg-layer-1 text-13 font-medium md:sticky",
+            { "left-0": !isWorkspaceLevel }
           )}
+          style={{
+            ...getColumnStyle("name", isWorkspaceLevel ? 360 : 320),
+            ...(isWorkspaceLevel ? { left: getColumnStyle("project", 144).width } : {}),
+          }}
           tabIndex={-1}
         >
           <div className="flex h-full w-full items-center gap-2 px-page-x">
             {/* Workitem header section */}
-            <div className="flex h-full min-w-80 flex-grow items-center gap-1 py-2.5">
+            <div className="flex h-full min-w-0 flex-grow items-center gap-1 py-2.5">
               {canSelectIssues && (
                 <div className="mr-1 flex w-3.5 flex-shrink-0 items-center">
                   <MultipleSelectGroupAction
@@ -88,11 +104,14 @@ export const SpreadsheetHeader = observer(function SpreadsheetHeader(props: Prop
               <span className="text-13 font-medium">{`${isEpic ? "Epics" : "Work items"}`}</span>
             </div>
           </div>
+          <ColumnResizeHandle onResizeStart={(e) => startResize("name", e)} onReset={() => resetWidth("name")} />
         </th>
 
         {spreadsheetColumnsList.map((property) => (
           <SpreadsheetHeaderColumn
             key={property}
+            onResizeStart={(e) => startResize(property, e)}
+            onResetWidth={() => resetWidth(property)}
             property={property}
             displayProperties={displayProperties}
             displayFilters={displayFilters}

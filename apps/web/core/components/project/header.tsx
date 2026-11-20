@@ -21,6 +21,7 @@ import { useUserPermissions } from "@/hooks/store/user";
 // plane web constants
 // components
 import HeaderFilters from "./filters";
+import { JoinAllProjects } from "./join-all-projects";
 import { ProjectSearch } from "./search-projects";
 
 export const ProjectsBaseHeader = observer(function ProjectsBaseHeader() {
@@ -58,6 +59,7 @@ export const ProjectsBaseHeader = observer(function ProjectsBaseHeader() {
         <div className="hidden md:flex">
           <HeaderFilters />
         </div>
+        {!isArchived && <JoinAllProjects />}
         {isAuthorizedUser && !isArchived ? (
           <Button
             variant="primary"

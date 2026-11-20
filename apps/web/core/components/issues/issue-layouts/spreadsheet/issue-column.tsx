@@ -11,6 +11,7 @@ import type { IIssueDisplayProperties, TIssue } from "@plane/types";
 // components
 import { SPREADSHEET_COLUMNS } from "@/plane-web/components/issues/issue-layouts/utils";
 import { shouldRenderColumn } from "@/helpers/issue-filter.helper";
+import { getColumnStyle } from "@/hooks/use-column-widths";
 import { WithDisplayPropertiesHOC } from "../properties/with-display-properties-HOC";
 
 type Props = {
@@ -45,7 +46,8 @@ export const IssueColumn = observer(function IssueColumn(props: Props) {
     >
       <td
         tabIndex={0}
-        className="h-11 min-w-36 border-r-[1px] border-subtle text-13 after:absolute after:bottom-[-1px] after:w-full after:border after:border-subtle"
+        className="h-11 overflow-hidden border-r-[1px] border-subtle text-13 after:absolute after:bottom-[-1px] after:w-full after:border after:border-subtle"
+        style={getColumnStyle(property, 144)}
         ref={tableCellRef}
       >
         <Column
