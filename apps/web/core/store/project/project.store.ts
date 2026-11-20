@@ -243,7 +243,7 @@ export class ProjectStore implements IProjectStore {
     if (!currentWorkspace) return [];
 
     let projects = Object.values(this.projectMap ?? {});
-    projects = sortBy(projects, "sort_order");
+    projects = sortBy(projects, (project) => project.name?.toLowerCase() ?? "");
 
     const projectIds = projects
       .filter((project) => project.workspace === currentWorkspace.id && !!project.member_role && !project.archived_at)

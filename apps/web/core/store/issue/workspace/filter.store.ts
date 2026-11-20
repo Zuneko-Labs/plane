@@ -158,15 +158,15 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
       sub_group_by: [],
     };
 
-    const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
-    displayFilters = this.computedDisplayFilters(_filters?.display_filters, {
+    const localFilters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
+    displayFilters = this.computedDisplayFilters(localFilters?.display_filters, {
       layout: EIssueLayoutTypes.SPREADSHEET,
-      order_by: "-created_at",
+      order_by: "project__name",
     });
-    displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+    displayProperties = this.computedDisplayProperties(localFilters?.display_properties);
     kanbanFilters = {
-      group_by: _filters?.kanban_filters?.group_by || [],
-      sub_group_by: _filters?.kanban_filters?.sub_group_by || [],
+      group_by: localFilters?.kanban_filters?.group_by || [],
+      sub_group_by: localFilters?.kanban_filters?.sub_group_by || [],
     };
 
     // Get the view details if the view is not a static view

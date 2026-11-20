@@ -5,9 +5,9 @@
 from rest_framework.response import Response
 from rest_framework import status
 from typing import Dict, List, Any
-from django.db.models import QuerySet, Q, Count
+from django.db.models import QuerySet, Q, Count, F, Case, When, Value, CharField
 from django.http import HttpRequest
-from django.db.models.functions import TruncMonth
+from django.db.models.functions import TruncMonth, Concat
 from django.utils import timezone
 from plane.app.views.base import BaseAPIView
 from plane.app.permissions import ROLE, allow_permission
@@ -141,18 +141,38 @@ class AdvanceAnalyticsStatsEndpoint(AdvanceAnalyticsBaseView):
             .order_by("project_id")
         )
 
-    def get_work_items_stats(self) -> Dict[str, Dict[str, int]]:
-        base_queryset = Issue.issue_objects.filter(**self.filters["base_filters"])
+    def get_work_items_stats(self) -> QuerySet:
+        # Work item counts per member (assignee), one row per workspace member with assigned work items
+        base_queryset = Issue.issue_objects.filter(**self.filters["base_filters"]).filter(
+            issue_assignee__deleted_at__isnull=True,
+            issue_assignee__assignee__is_bot=False,
+        )
         return (
-            base_queryset.values("project_id", "project__name")
-            .annotate(
-                cancelled_work_items=Count("id", filter=Q(state__group="cancelled")),
-                completed_work_items=Count("id", filter=Q(state__group="completed")),
-                backlog_work_items=Count("id", filter=Q(state__group="backlog")),
-                un_started_work_items=Count("id", filter=Q(state__group="unstarted")),
-                started_work_items=Count("id", filter=Q(state__group="started")),
+            base_queryset.annotate(
+                display_name=F("issue_assignee__assignee__display_name"),
+                assignee_id=F("issue_assignee__assignee_id"),
+                avatar_url=Case(
+                    When(
+                        issue_assignee__assignee__avatar_asset__isnull=False,
+                        then=Concat(
+                            Value("/api/assets/v2/static/"),
+                            "issue_assignee__assignee__avatar_asset",
+                            Value("/"),
+                        ),
+                    ),
+                    default="issue_assignee__assignee__avatar",
+                    output_field=CharField(),
+                ),
             )
-            .order_by("project_id")
+            .values("display_name", "assignee_id", "avatar_url")
+            .annotate(
+                cancelled_work_items=Count("id", filter=Q(state__group="cancelled"), distinct=True),
+                completed_work_items=Count("id", filter=Q(state__group="completed"), distinct=True),
+                backlog_work_items=Count("id", filter=Q(state__group="backlog"), distinct=True),
+                un_started_work_items=Count("id", filter=Q(state__group="unstarted"), distinct=True),
+                started_work_items=Count("id", filter=Q(state__group="started"), distinct=True),
+            )
+            .order_by("display_name")
         )
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER], level="WORKSPACE")
