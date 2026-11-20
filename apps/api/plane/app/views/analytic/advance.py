@@ -141,30 +141,26 @@ class AdvanceAnalyticsStatsEndpoint(AdvanceAnalyticsBaseView):
             .order_by("project_id")
         )
 
-    def get_work_items_stats(self) -> QuerySet:
-        # Work item counts per member (assignee), one row per workspace member with assigned work items
-        base_queryset = Issue.issue_objects.filter(**self.filters["base_filters"]).filter(
-            issue_assignee__deleted_at__isnull=True,
-            issue_assignee__assignee__is_bot=False,
-        )
-        return (
-            base_queryset.annotate(
-                display_name=F("issue_assignee__assignee__display_name"),
-                assignee_id=F("issue_assignee__assignee_id"),
-                avatar_url=Case(
-                    When(
-                        issue_assignee__assignee__avatar_asset__isnull=False,
-                        then=Concat(
-                            Value("/api/assets/v2/static/"),
-                            "issue_assignee__assignee__avatar_asset",
-                            Value("/"),
-                        ),
-                    ),
-                    default="issue_assignee__assignee__avatar",
-                    output_field=CharField(),
-                ),
-            )
-            .values("display_name", "assignee_id", "avatar_url")
+    STATE_COUNT_KEYS = (
+        "cancelled_work_items",
+        "completed_work_items",
+        "backlog_work_items",
+        "un_started_work_items",
+        "started_work_items",
+    )
+
+    def get_work_items_stats(self) -> List[Dict[str, Any]]:
+        """Work item counts per member.
+
+        Returns one row for every active (non-bot) workspace member — or every member of the
+        selected projects when `project_ids` is passed — including members with no assigned
+        work items (all counts 0).
+        """
+        # counts per assignee
+        assigned_counts = (
+            Issue.issue_objects.filter(**self.filters["base_filters"])
+            .filter(issue_assignee__deleted_at__isnull=True, issue_assignee__assignee__is_bot=False)
+            .values(member_id=F("issue_assignee__assignee_id"))
             .annotate(
                 cancelled_work_items=Count("id", filter=Q(state__group="cancelled"), distinct=True),
                 completed_work_items=Count("id", filter=Q(state__group="completed"), distinct=True),
@@ -172,8 +168,49 @@ class AdvanceAnalyticsStatsEndpoint(AdvanceAnalyticsBaseView):
                 un_started_work_items=Count("id", filter=Q(state__group="unstarted"), distinct=True),
                 started_work_items=Count("id", filter=Q(state__group="started"), distinct=True),
             )
-            .order_by("display_name")
         )
+        counts_by_member = {str(row["member_id"]): row for row in assigned_counts}
+
+        # members to list
+        project_ids = self.request.GET.get("project_ids", None)
+        if project_ids:
+            members_query = ProjectMember.objects.filter(
+                project_id__in=[str(pid) for pid in project_ids.split(",")],
+                project__workspace__slug=self._workspace_slug,
+                is_active=True,
+                member__is_bot=False,
+            )
+        else:
+            members_query = WorkspaceMember.objects.filter(
+                workspace__slug=self._workspace_slug, is_active=True, member__is_bot=False
+            )
+        members = (
+            members_query.annotate(
+                avatar_url=Case(
+                    When(
+                        member__avatar_asset__isnull=False,
+                        then=Concat(Value("/api/assets/v2/static/"), "member__avatar_asset", Value("/")),
+                    ),
+                    default="member__avatar",
+                    output_field=CharField(),
+                )
+            )
+            .values("member_id", "member__display_name", "avatar_url")
+            .distinct()
+        )
+
+        rows = []
+        for member in members:
+            counts = counts_by_member.get(str(member["member_id"]), {})
+            rows.append(
+                {
+                    "assignee_id": member["member_id"],
+                    "display_name": member["member__display_name"],
+                    "avatar_url": member["avatar_url"],
+                    **{key: counts.get(key, 0) for key in self.STATE_COUNT_KEYS},
+                }
+            )
+        return sorted(rows, key=lambda row: (row["display_name"] or "").lower())
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER], level="WORKSPACE")
     def get(self, request: HttpRequest, slug: str) -> Response:
