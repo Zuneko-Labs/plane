@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import { useEffect, useRef, useState } from "react";
 // plane imports
 import { SearchIcon, CloseIcon } from "@plane/propel/icons";
 
@@ -16,8 +17,40 @@ type Props = {
 export function WorkItemNameSearchInput(props: Props) {
   const { searchQuery, updateSearchQuery, placeholder = "Search work items" } = props;
 
+  // Keep the typed value locally. `searchQuery` often comes from the URL, which updates
+  // asynchronously; binding the input to it directly resets the box to a stale value and drops letters.
+  const [inputValue, setInputValue] = useState(searchQuery);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSentRef = useRef(searchQuery);
+
+  // external change (e.g. navigation, clear) -> sync, but never overwrite what the user is mid-typing
+  useEffect(() => {
+    if (searchQuery !== lastSentRef.current) {
+      lastSentRef.current = searchQuery;
+      setInputValue(searchQuery);
+    }
+  }, [searchQuery]);
+
+  useEffect(
+    () => () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    },
+    []
+  );
+
+  const commit = (value: string, immediate = false) => {
+    setInputValue(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    const send = () => {
+      lastSentRef.current = value;
+      updateSearchQuery(value);
+    };
+    if (immediate) send();
+    else debounceRef.current = setTimeout(send, 250);
+  };
+
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape" && searchQuery.trim() !== "") updateSearchQuery("");
+    if (e.key === "Escape" && inputValue.trim() !== "") commit("", true);
   };
 
   return (
@@ -26,12 +59,12 @@ export function WorkItemNameSearchInput(props: Props) {
       <input
         className="w-full border-none bg-transparent text-13 text-primary placeholder:text-placeholder focus:outline-none"
         placeholder={placeholder}
-        value={searchQuery}
-        onChange={(e) => updateSearchQuery(e.target.value)}
+        value={inputValue}
+        onChange={(e) => commit(e.target.value)}
         onKeyDown={handleInputKeyDown}
       />
-      {searchQuery.trim() !== "" && (
-        <button type="button" className="grid flex-shrink-0 place-items-center" onClick={() => updateSearchQuery("")}>
+      {inputValue.trim() !== "" && (
+        <button type="button" className="grid flex-shrink-0 place-items-center" onClick={() => commit("", true)}>
           <CloseIcon className="h-3 w-3" />
         </button>
       )}

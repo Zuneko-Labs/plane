@@ -9,12 +9,14 @@ import { format, parseISO } from "date-fns";
 import Link from "next/link";
 // plane imports
 import { STATE_GROUPS } from "@plane/constants";
+import { Popover } from "@plane/propel/popover";
 import { Tooltip } from "@plane/propel/tooltip";
 import { Avatar } from "@plane/ui";
 import { cn, getFileURL } from "@plane/utils";
 // services
 import type { TTeamCalendarIssue, TTeamCalendarMember } from "@/services/team-calendar.service";
 // local imports
+import { IssueChip } from "./issue-chip";
 import type { TIssueBarPlacement } from "./utils";
 import { computeBarPlacements, DATE_FORMAT } from "./utils";
 
@@ -22,6 +24,8 @@ const MEMBER_COLUMN_WIDTH = 240;
 const BAR_HEIGHT = 34;
 const ROW_VERTICAL_PADDING = 8;
 const MIN_ROW_HEIGHT = 44;
+const MAX_LANES = 3;
+const MORE_ROW_HEIGHT = 22;
 
 const hexToRgb = (hex: string): [number, number, number] | null => {
   const match = hex.replace("#", "").match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
@@ -91,8 +95,14 @@ type MemberRowProps = {
 
 function MemberRow({ workspaceSlug, member, weekDays, today }: MemberRowProps) {
   const placements = useMemo(() => computeBarPlacements(member.issues, weekDays), [member.issues, weekDays]);
-  const laneCount = placements.reduce((max, placement) => Math.max(max, placement.lane + 1), 0);
-  const rowHeight = Math.max(MIN_ROW_HEIGHT, laneCount * (BAR_HEIGHT + 4) + ROW_VERTICAL_PADDING);
+  // cap visible lanes so busy members do not blow the row up; the rest go behind "+N more"
+  const visiblePlacements = placements.filter((placement) => placement.lane < MAX_LANES);
+  const hiddenPlacements = placements.filter((placement) => placement.lane >= MAX_LANES);
+  const laneCount = visiblePlacements.reduce((max, placement) => Math.max(max, placement.lane + 1), 0);
+  const rowHeight = Math.max(
+    MIN_ROW_HEIGHT,
+    laneCount * (BAR_HEIGHT + 4) + ROW_VERTICAL_PADDING + (hiddenPlacements.length > 0 ? MORE_ROW_HEIGHT : 0)
+  );
 
   return (
     <div className="flex border-b border-subtle" style={{ minHeight: rowHeight }}>
@@ -115,7 +125,7 @@ function MemberRow({ workspaceSlug, member, weekDays, today }: MemberRowProps) {
           ))}
         </div>
         <div className="relative" style={{ height: rowHeight }}>
-          {placements.map((placement) => (
+          {visiblePlacements.map((placement) => (
             <IssueBar
               key={`${placement.issue.id}-${placement.lane}`}
               workspaceSlug={workspaceSlug}
@@ -123,6 +133,37 @@ function MemberRow({ workspaceSlug, member, weekDays, today }: MemberRowProps) {
               dayCount={weekDays.length}
             />
           ))}
+          {hiddenPlacements.length > 0 && (
+            <div className="absolute right-1 bottom-0.5">
+              <Popover>
+                <Popover.Button
+                  className="rounded-sm bg-layer-1 px-1.5 text-11 font-medium text-secondary hover:bg-layer-1-hover"
+                  render={<button type="button" />}
+                >
+                  +{hiddenPlacements.length} more
+                </Popover.Button>
+                <Popover.Panel
+                  side="bottom"
+                  align="end"
+                  positionerClassName="z-30"
+                  className="w-72 rounded-lg border border-subtle bg-surface-1 p-2 shadow-raised-200"
+                >
+                  <p className="px-1 pb-1.5 text-12 font-semibold text-primary">{member.display_name}</p>
+                  <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+                    {placements.map((placement) => (
+                      <IssueChip
+                        key={placement.issue.id}
+                        workspaceSlug={workspaceSlug}
+                        issue={placement.issue}
+                        member={member}
+                        showAvatar={false}
+                      />
+                    ))}
+                  </div>
+                </Popover.Panel>
+              </Popover>
+            </div>
+          )}
         </div>
       </div>
     </div>
