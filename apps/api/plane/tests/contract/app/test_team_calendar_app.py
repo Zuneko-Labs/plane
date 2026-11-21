@@ -158,7 +158,7 @@ class TestTeamCalendarAPI(TestTeamCalendarBase):
         assert str(issue_b.id) not in all_issue_ids
 
     @pytest.mark.django_db
-    def test_only_shows_unstarted_and_started_issues(self, session_client, create_user, workspace):
+    def test_shows_open_issues_but_not_completed_or_cancelled(self, session_client, create_user, workspace):
         project = self.create_project(workspace, create_user)
 
         unstarted_issue = self.create_assigned_issue(
@@ -197,6 +197,6 @@ class TestTeamCalendarAPI(TestTeamCalendarBase):
         issue_ids = {str(issue["id"]) for issue in members[str(create_user.id)]["issues"]}
         assert str(unstarted_issue.id) in issue_ids
         assert str(started_issue.id) in issue_ids
-        assert str(backlog_issue.id) not in issue_ids
+        assert str(backlog_issue.id) in issue_ids
         assert str(completed_issue.id) not in issue_ids
         assert str(cancelled_issue.id) not in issue_ids

@@ -93,8 +93,8 @@ class TeamCalendarEndpoint(BaseAPIView):
             | Q(target_date__isnull=True, effective_start_date__lte=window_end)
         )
 
-        # Only show in-progress work — unstarted and started items.
-        ACTIVE_STATE_GROUPS = ["unstarted", "started"]
+        # Show open work: backlog, unstarted and started (completed/cancelled stay hidden).
+        ACTIVE_STATE_GROUPS = ["backlog", "unstarted", "started"]
 
         issues = (
             Issue.issue_objects.filter(
