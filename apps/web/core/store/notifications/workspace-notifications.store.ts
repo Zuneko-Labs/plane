@@ -60,7 +60,7 @@ export interface IWorkspaceNotificationStore {
     queryCursorType?: TNotificationQueryParamType
   ) => Promise<TNotificationPaginatedInfo | undefined>;
   getAllAndMentionedNotifications: (workspaceSlug: string) => Promise<void>;
-  markAllNotificationsAsRead: (workspaceId: string) => Promise<void>;
+  markAllNotificationsAsRead: (workspaceSlug: string, markEverything?: boolean) => Promise<void>;
 }
 
 export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
@@ -408,7 +408,7 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
    * @param { string } workspaceSlug,
    * @returns { void }
    */
-  markAllNotificationsAsRead = async (workspaceSlug: string): Promise<void> => {
+  markAllNotificationsAsRead = async (workspaceSlug: string, markEverything: boolean = false): Promise<void> => {
     try {
       this.loader = ENotificationLoader.MARK_ALL_AS_READY;
       const queryParams = this.generateNotificationQueryParams(ENotificationQueryParamType.INIT);
@@ -417,22 +417,23 @@ export class WorkspaceNotificationStore implements IWorkspaceNotificationStore {
         snoozed: queryParams.snoozed,
         archived: queryParams.archived,
         read: queryParams.read,
+        // only scope to mentions when the user is on the mentions tab
+        ...(!markEverything && this.currentNotificationTab === ENotificationTab.MENTIONS ? { mentioned: true } : {}),
       };
       await workspaceNotificationService.markAllNotificationsAsRead(workspaceSlug, params);
+      const readAt = new Date().toISOString();
       runInAction(() => {
-        update(
-          this.unreadNotificationsCount,
-          this.currentNotificationTab === ENotificationTab.ALL
-            ? "total_unread_notifications_count"
-            : "mention_unread_notifications_count",
-          () => 0
-        );
-        Object.values(this.notifications).forEach((notification) =>
-          notification.mutateNotification({
-            read_at: new Date().toUTCString(),
-          })
-        );
+        const isMentionsTab = !markEverything && this.currentNotificationTab === ENotificationTab.MENTIONS;
+        // "All" marks mentions too, so both buckets drop to zero
+        update(this.unreadNotificationsCount, "mention_unread_notifications_count", () => 0);
+        if (!isMentionsTab) update(this.unreadNotificationsCount, "total_unread_notifications_count", () => 0);
+        Object.values(this.notifications).forEach((notification) => {
+          if (isMentionsTab && !notification.is_mentioned_notification) return;
+          notification.mutateNotification({ read_at: readAt });
+        });
       });
+      // re-sync counts with the server (source of truth)
+      this.getUnreadNotificationsCount(workspaceSlug).catch(() => undefined);
     } catch (error) {
       console.error("WorkspaceNotificationStore -> markAllNotificationsAsRead -> error", error);
       throw error;

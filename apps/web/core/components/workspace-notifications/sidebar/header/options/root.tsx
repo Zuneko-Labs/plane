@@ -9,6 +9,7 @@ import { CheckCheck, RefreshCw } from "lucide-react";
 // plane imports
 import { ENotificationLoader, ENotificationQueryParamType } from "@plane/constants";
 import { useTranslation } from "@plane/i18n";
+import { TOAST_TYPE, setToast } from "@plane/propel/toast";
 import { Tooltip } from "@plane/propel/tooltip";
 import { Spinner } from "@plane/ui";
 // hooks
@@ -48,6 +49,11 @@ export const NotificationSidebarHeaderOptions = observer(function NotificationSi
       await markAllNotificationsAsRead(workspaceSlug);
     } catch (error) {
       console.error(error);
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: "Error!",
+        message: "Failed to mark all notifications as read. Please try again.",
+      });
     }
   };
 

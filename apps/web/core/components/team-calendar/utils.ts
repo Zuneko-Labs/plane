@@ -4,15 +4,32 @@
  * See the LICENSE file for details.
  */
 
-import { addDays, format, startOfWeek } from "date-fns";
+import { addDays, eachDayOfInterval, endOfMonth, endOfWeek, format, startOfMonth, startOfWeek } from "date-fns";
 // services
 import type { TTeamCalendarIssue } from "@/services/team-calendar.service";
 
 export const DATE_FORMAT = "yyyy-MM-dd";
 
+export type TTeamCalendarView = "week" | "month";
+
 export const getWeekDays = (anchor: Date): string[] => {
   const weekStart = startOfWeek(anchor, { weekStartsOn: 1 });
   return Array.from({ length: 7 }, (_, index) => format(addDays(weekStart, index), DATE_FORMAT));
+};
+
+/** All days shown by a Google-style month grid: full weeks covering the anchor's month. */
+export const getMonthGridDays = (anchor: Date): string[] =>
+  eachDayOfInterval({
+    start: startOfWeek(startOfMonth(anchor), { weekStartsOn: 1 }),
+    end: endOfWeek(endOfMonth(anchor), { weekStartsOn: 1 }),
+  }).map((day) => format(day, DATE_FORMAT));
+
+/** Inclusive date span (yyyy-MM-dd) an issue occupies, mirroring computeBarPlacements. */
+export const getIssueSpan = (issue: TTeamCalendarIssue, windowEnd: string): { start: string; end: string } | null => {
+  const start = issue.effective_start_date ?? issue.start_date ?? issue.target_date;
+  const end = issue.target_date ?? (issue.start_date ? windowEnd : null);
+  if (!start || !end) return null;
+  return { start, end };
 };
 
 export type TIssueBarPlacement = {

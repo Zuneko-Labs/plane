@@ -38,9 +38,10 @@ export const NotificationOption = observer(function NotificationOption(props: TN
 
   return (
     <div
-      className={cn("hidden flex-shrink-0 text-body-xs-medium group-hover:block", {
-        block: isSnoozeStateModalOpen,
-      })}
+      className={cn(
+        "invisible flex-shrink-0 text-body-xs-medium opacity-0 transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100",
+        { "visible opacity-100": isSnoozeStateModalOpen || customSnoozeModal }
+      )}
     >
       <div className="relative flex items-center justify-center gap-2">
         {/* read */}

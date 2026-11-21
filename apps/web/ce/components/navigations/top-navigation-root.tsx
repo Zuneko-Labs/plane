@@ -7,6 +7,7 @@
 // components
 import { useState } from "react";
 import { observer } from "mobx-react";
+import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { cn, calculateTimeAgo } from "@plane/utils";
 import { TopNavPowerK } from "@/components/navigation";
@@ -33,6 +34,7 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
     notifications,
     isInboxPreviewOpen,
     setIsInboxPreviewOpen,
+    markAllNotificationsAsRead,
   } = useWorkspaceNotifications();
   const { preferences } = useAppRailPreferences();
   const { currentWorkspace } = useWorkspace();
@@ -141,36 +143,78 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
             }}
           />
           {showAutoBanner && (
-            <div className="absolute top-full right-0 z-50 mt-2 w-max rounded-lg border border-subtle-1 bg-layer-2 px-3 py-2 shadow-overlay-200">
-              <p className="text-caption-sm-regular text-primary">You have new messages</p>
+            // pt-2 (not margin) keeps the hover area contiguous with the trigger
+            <div className="absolute top-full right-0 z-50 pt-2">
+              <div className="w-max rounded-lg border border-subtle-1 bg-layer-2 px-3 py-2 shadow-overlay-200">
+                <p className="text-caption-sm-regular text-primary">You have new messages</p>
+              </div>
             </div>
           )}
           {showFullPreview && (
-            <div className="absolute top-full right-0 z-50 mt-2 w-80 rounded-lg border border-subtle-1 bg-layer-2 p-2 shadow-overlay-200">
-              <p className="px-2 py-1 text-caption-md-medium text-primary">Inbox</p>
-              {previewNotificationIds.length === 0 ? (
-                <p className="px-2 py-2 text-caption-sm-regular text-secondary">No new notifications</p>
-              ) : (
-                <div className="flex flex-col gap-0.5">
-                  {previewNotificationIds.map((notificationId) => {
-                    const notification = notifications[notificationId];
-                    if (!notification) return null;
-                    return (
-                      <div key={notificationId} className="rounded-md px-2 py-1.5 hover:bg-layer-1">
-                        <p className="line-clamp-1 text-13 text-primary">
-                          <NotificationContent
-                            notification={notification.asJson}
-                            workspaceId={currentWorkspace?.id ?? ""}
-                            workspaceSlug={workspaceSlug.toString()}
-                            projectId={notification.project ?? ""}
-                          />
-                        </p>
-                        <p className="text-11 text-tertiary">{calculateTimeAgo(notification.created_at ?? null)}</p>
-                      </div>
-                    );
-                  })}
+            <div className="absolute top-full right-0 z-50 pt-2">
+              <div className="w-80 rounded-lg border border-subtle-1 bg-layer-2 p-2 shadow-overlay-200">
+                <div className="flex items-center justify-between px-2 py-1">
+                  <p className="text-caption-md-medium text-primary">Inbox</p>
+                  {previewNotificationIds.length > 0 && (
+                    <button
+                      type="button"
+                      className="text-11 font-medium text-accent-primary hover:underline"
+                      onClick={() => {
+                        if (workspaceSlug)
+                          markAllNotificationsAsRead(workspaceSlug.toString(), true).catch((error) =>
+                            console.error(error)
+                          );
+                      }}
+                    >
+                      Mark all as read
+                    </button>
+                  )}
                 </div>
-              )}
+                {previewNotificationIds.length === 0 ? (
+                  <p className="px-2 py-2 text-caption-sm-regular text-secondary">No new notifications</p>
+                ) : (
+                  <div className="flex flex-col gap-0.5">
+                    {previewNotificationIds.map((notificationId) => {
+                      const notification = notifications[notificationId];
+                      if (!notification) return null;
+                      const issueId = notification.data?.issue?.id;
+                      const href =
+                        notification.project && issueId
+                          ? `/${workspaceSlug?.toString()}/projects/${notification.project}/issues/${issueId}`
+                          : `/${workspaceSlug?.toString()}/notifications/`;
+                      return (
+                        <Link
+                          key={notificationId}
+                          href={href}
+                          className="block cursor-pointer rounded-md px-2 py-1.5 hover:bg-layer-1"
+                          onClick={() => {
+                            if (workspaceSlug)
+                              notification.markNotificationAsRead(workspaceSlug.toString()).catch(() => undefined);
+                            setIsHoveringPreview(false);
+                          }}
+                        >
+                          <p className="line-clamp-1 text-13 text-primary">
+                            <NotificationContent
+                              notification={notification.asJson}
+                              workspaceId={currentWorkspace?.id ?? ""}
+                              workspaceSlug={workspaceSlug.toString()}
+                              projectId={notification.project ?? ""}
+                            />
+                          </p>
+                          <p className="text-11 text-tertiary">{calculateTimeAgo(notification.created_at ?? null)}</p>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+                <Link
+                  href={`/${workspaceSlug?.toString()}/notifications/`}
+                  className="mt-1 block rounded-md px-2 py-1.5 text-center text-11 font-medium text-secondary hover:bg-layer-1 hover:text-primary"
+                  onClick={() => setIsHoveringPreview(false)}
+                >
+                  View all
+                </Link>
+              </div>
             </div>
           )}
         </div>

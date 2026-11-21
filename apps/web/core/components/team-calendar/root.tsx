@@ -5,7 +5,7 @@
  */
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
-import { addDays, format, parseISO } from "date-fns";
+import { addDays, addMonths, format, parseISO } from "date-fns";
 import { sortBy } from "lodash-es";
 import { ChevronDown, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { CheckIcon } from "@plane/propel/icons";
@@ -24,8 +24,11 @@ import { useUserPermissions } from "@/hooks/store/user";
 // services
 import { teamCalendarService } from "@/services/team-calendar.service";
 // local imports
+import { DatePickerPopover } from "./date-picker-popover";
 import { TeamCalendarGrid } from "./grid";
-import { getWeekDays } from "./utils";
+import { MonthGrid } from "./month-grid";
+import type { TTeamCalendarView } from "./utils";
+import { getMonthGridDays, getWeekDays } from "./utils";
 
 type StatusFilterProps = {
   states: { name: string; color: string }[];
@@ -117,7 +120,8 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
   const { workspaceSlug } = useParams();
   const slug = workspaceSlug?.toString() ?? "";
   const { allowPermissions } = useUserPermissions();
-  const [weekAnchor, setWeekAnchor] = useState(() => new Date());
+  const [anchor, setAnchor] = useState(() => new Date());
+  const [view, setView] = useState<TTeamCalendarView>("week");
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const router = useRouter();
   const pathname = usePathname();
@@ -139,12 +143,21 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
 
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
 
-  const weekDays = useMemo(() => getWeekDays(weekAnchor), [weekAnchor]);
+  const isMonthView = view === "month";
+  // visible days: 7 for week view, full weeks of the month for month view
+  const weekDays = useMemo(() => (isMonthView ? getMonthGridDays(anchor) : getWeekDays(anchor)), [anchor, isMonthView]);
   const weekStart = weekDays[0];
   const weekEnd = weekDays[weekDays.length - 1];
+  const step = (direction: 1 | -1) =>
+    setAnchor((a) => (isMonthView ? addMonths(a, direction) : addDays(a, 7 * direction)));
+  const titleLabel = isMonthView
+    ? format(anchor, "MMMM yyyy")
+    : `${format(parseISO(weekStart), "MMM d")} – ${format(parseISO(weekEnd), "MMM d, yyyy")}`;
 
   const { data, isLoading, error } = useSWR(
-    slug && isAdmin ? ["team-calendar", slug, weekStart, selectedProjects.join(","), selectedStates.join(",")] : null,
+    slug && isAdmin
+      ? ["team-calendar", slug, weekStart, weekEnd, selectedProjects.join(","), selectedStates.join(",")]
+      : null,
     () =>
       teamCalendarService.getTeamCalendar(slug, {
         start_date: weekStart,
@@ -192,28 +205,40 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
       {/* controls */}
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-b border-subtle px-4 py-3">
         <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={() => setAnchor(new Date())}>
+            Today
+          </Button>
           <button
             type="button"
             className="grid size-7 place-items-center rounded-sm hover:bg-layer-transparent-hover"
-            onClick={() => setWeekAnchor((anchor) => addDays(anchor, -7))}
-            aria-label="Previous week"
+            onClick={() => step(-1)}
+            aria-label={isMonthView ? "Previous month" : "Previous week"}
           >
             <ChevronLeft className="size-4" />
           </button>
-          <span className="min-w-40 text-center text-13 font-semibold text-primary">
-            {format(parseISO(weekStart), "MMM d")} – {format(parseISO(weekEnd), "MMM d, yyyy")}
-          </span>
           <button
             type="button"
             className="grid size-7 place-items-center rounded-sm hover:bg-layer-transparent-hover"
-            onClick={() => setWeekAnchor((anchor) => addDays(anchor, 7))}
-            aria-label="Next week"
+            onClick={() => step(1)}
+            aria-label={isMonthView ? "Next month" : "Next week"}
           >
             <ChevronRight className="size-4" />
           </button>
-          <Button variant="secondary" size="sm" onClick={() => setWeekAnchor(new Date())}>
-            Today
-          </Button>
+          <DatePickerPopover label={titleLabel} anchor={anchor} onChange={setAnchor} />
+          <div className="ml-2 flex items-center rounded-md border border-subtle p-0.5">
+            {(["week", "month"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={`rounded-sm px-2.5 py-0.5 text-12 font-medium capitalize ${
+                  view === option ? "bg-layer-1-selected text-primary" : "text-tertiary hover:text-secondary"
+                }`}
+                onClick={() => setView(option)}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <StatusFilter states={availableStates} selected={selectedStates} onChange={setSelectedStates} />
@@ -268,12 +293,16 @@ export const TeamCalendarRoot = observer(function TeamCalendarRoot() {
           <div className="flex h-full items-center justify-center text-13 text-tertiary">
             Failed to load the team calendar. Please try again.
           </div>
+        ) : isMonthView ? (
+          <MonthGrid workspaceSlug={slug} members={visibleMembers} days={weekDays} anchor={anchor} />
         ) : (
           <TeamCalendarGrid workspaceSlug={slug} members={visibleMembers} weekDays={weekDays} />
         )}
       </div>
       <div className="flex-shrink-0 border-t border-subtle px-4 py-2 text-11 text-tertiary">
-        Bars span from a work item&apos;s start date to its due date.
+        {isMonthView
+          ? "Work items appear on every day from their start date to their due date."
+          : "Bars span from a work item's start date to its due date."}
       </div>
     </div>
   );
